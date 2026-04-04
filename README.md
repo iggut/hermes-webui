@@ -176,7 +176,7 @@ Or using the agent venv explicitly:
 ```
 
 Tests run against an isolated server on port 8788 with a separate state directory.
-Production data and real cron jobs are never touched. Current count: **426 tests**
+Production data and real cron jobs are never touched. Current count: **424 tests**
 across 22 test files.
 
 ---
@@ -191,6 +191,7 @@ across 22 test files.
 - Retry the last assistant response with one click
 - Cancel a running task from the activity bar
 - Tool call cards inline -- each shows the tool name, args, and result snippet; expand/collapse all toggle for multi-tool turns
+- Subagent delegation cards -- child agent activity shown with distinct icon and indented border
 - Mermaid diagram rendering inline (flowcharts, sequence diagrams, gantt charts)
 - Thinking/reasoning display -- collapsible gold-themed cards for Claude extended thinking and o3 reasoning blocks
 - Approval card for dangerous shell commands (allow once / session / always / deny)
@@ -211,6 +212,8 @@ across 22 test files.
 - Download as Markdown transcript, full JSON export, or import from JSON
 - Sessions persist across page reloads and SSH tunnel reconnects
 - Browser tab title reflects the active session name
+- CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
+- Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
 
 ### Workspace file browser
 - Directory tree with expand/collapse (single-click toggles, double-click navigates)
@@ -250,19 +253,21 @@ across 22 test files.
 ### Settings and configuration
 - Settings panel (gear icon) -- default model, default workspace, send key preference
 - Send key: Enter (default) or Ctrl/Cmd+Enter
+- Show/hide CLI sessions toggle (enabled by default)
+- Token usage display toggle (off by default, also via `/usage` command)
 - Cron completion alerts -- toast notifications and unread badge on Tasks tab
 - Background agent error alerts -- banner when a non-active session encounters an error
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
-- Built-in: `/help`, `/clear`, `/model <name>`, `/workspace <name>`, `/new`
+- Built-in: `/help`, `/clear`, `/model <name>`, `/workspace <name>`, `/new`, `/usage`
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
 
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
-- **Skills** -- list all skills by category, search, preview, create/edit/delete
+- **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
 - **Todos** -- live task list from the current session

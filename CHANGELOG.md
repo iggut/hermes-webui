@@ -5,6 +5,32 @@
 
 ---
 
+## [v0.30.1] CLI Session Bridge Fixes
+*April 4, 2026 | 424 tests*
+
+### Bug Fixes
+- **CLI sessions not appearing in sidebar.** Three frontend gaps: `sessions.js`
+  wasn't rendering CLI sessions (missing `is_cli_session` check in render loop),
+  sidebar click handler didn't trigger import, and the "cli" badge CSS selector
+  wasn't matching the rendered DOM structure. (#58)
+- **CLI bridge read wrong profile's state.db.** `get_cli_sessions()` resolved
+  `HERMES_HOME` at server launch time, not at call time. After a profile switch,
+  it kept reading the original profile's database. Now resolves dynamically via
+  `get_active_hermes_home()`. (#59)
+- **Silent SQL error swallowed all CLI sessions.** The `sessions` table in
+  `state.db` has no `profile` column — the query referenced `s.profile` which
+  caused a silent `OperationalError`. The `except Exception: return []` handler
+  swallowed it, returning zero CLI sessions. Removed the column reference and
+  added explicit column-existence checks. (#60)
+
+### Features
+- **"Show CLI sessions" toggle in Settings.** New checkbox in the Settings panel
+  to show/hide CLI sessions in the sidebar. Persisted server-side in
+  `settings.json` (`show_cli_sessions`, default `true`). When disabled, CLI
+  sessions are excluded from `/api/sessions` responses. (#61)
+
+---
+
 ## [v0.30] CLI Session Bridge (Community: @thadreber-web)
 *April 4, 2026 | 424 tests*
 
@@ -1042,4 +1068,4 @@ Three-panel layout: sessions sidebar, chat area, workspace panel.
 
 ---
 
-*Last updated: v0.30, April 4, 2026 | Tests: 426*
+*Last updated: v0.30.1, April 4, 2026 | Tests: 424*
