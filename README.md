@@ -314,17 +314,24 @@ across 22 test files.
 - 20MB POST body size limit
 - CDN resources pinned with SRI integrity hashes
 
+### Themes
+- 6 built-in themes: Dark (default), Light, Slate, Solarized Dark, Monokai, Nord
+- Switch via Settings panel dropdown (instant live preview) or `/theme` command
+- Persists across reloads (server-side in settings.json + localStorage for flicker-free loading)
+- Custom themes: define a `:root[data-theme="name"]` CSS block and it works — see [THEMES.md](THEMES.md)
+
 ### Settings and configuration
-- Settings panel (gear icon) -- default model, default workspace, send key preference
+- Settings panel (gear icon) -- default model, default workspace, send key, theme
 - Send key: Enter (default) or Ctrl/Cmd+Enter
 - Show/hide CLI sessions toggle (enabled by default)
 - Token usage display toggle (off by default, also via `/usage` command)
+- Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badge on Tasks tab
 - Background agent error alerts -- banner when a non-active session encounters an error
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
-- Built-in: `/help`, `/clear`, `/model <name>`, `/workspace <name>`, `/new`, `/usage`
+- Built-in: `/help`, `/clear`, `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`, `/compact`
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
 
@@ -393,6 +400,7 @@ State lives outside the repo at `~/.hermes/webui-mvp/` by default
 - `TESTING.md` -- manual browser test plan and automated coverage reference
 - `CHANGELOG.md` -- release notes per sprint
 - `SPRINTS.md` -- forward sprint plan with CLI + Claude parity targets
+- `THEMES.md` -- theme system documentation, custom theme guide
 
 ## Repo
 

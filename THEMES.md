@@ -22,7 +22,8 @@ preview is instant — the UI updates as you click through options.
 | Theme | Description |
 |-------|-------------|
 | **Dark** (default) | Deep navy/indigo with muted blue accents. Easy on the eyes for long sessions. |
-| **Light** | Clean white/gray with dark text. High contrast for bright environments. |
+| **Light** | Warm off-white with dark text. High contrast for bright environments. |
+| **Slate** | Warm charcoal, lighter than Dark. Easier on the eyes for extended use. |
 | **Solarized Dark** | Ethan Schoonover's classic dark palette. Teal background, warm accents. |
 | **Monokai** | Warm dark theme inspired by the Monokai editor scheme. Green/pink accents. |
 | **Nord** | Arctic blue-gray palette from the Nord color system. Calm and minimal. |

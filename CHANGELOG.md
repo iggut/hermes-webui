@@ -5,6 +5,42 @@
 
 ---
 
+## [v0.34] Sprint 26 -- Pluggable UI Themes
+*April 5, 2026 | 433 tests*
+
+### Features
+- **6 built-in themes.** Dark (default), Light, Slate, Solarized Dark, Monokai,
+  Nord. Defined as CSS variable overrides on `:root[data-theme="name"]` — the
+  entire UI adapts automatically.
+- **Theme picker in Settings.** Dropdown with instant live preview. Changes
+  apply immediately as you click through options.
+- **`/theme` slash command.** `/theme dark`, `/theme light`, etc.
+- **Theme persistence.** Saved server-side in `settings.json` and client-side
+  in `localStorage` for flicker-free loading on page refresh.
+- **Flash prevention.** Inline `<script>` in `<head>` reads localStorage before
+  the stylesheet loads — no flash of the wrong theme.
+- **Custom theme support.** Any theme name is accepted (no enum gate). Create a
+  `:root[data-theme="name"]` CSS block and it works. See `THEMES.md`.
+- **Unsaved changes guard.** Settings panel now tracks dirty state and shows a
+  "You have unsaved changes" bar with Save/Discard buttons when closing with
+  unpersisted changes. Theme preview reverts on discard.
+
+### Architecture
+- `static/style.css`: 6 theme blocks using CSS variable overrides. Light theme
+  includes scrollbar and selection overrides.
+- `static/commands.js`: `/theme` command with validation.
+- `static/panels.js`: Settings dirty tracking, revert-on-discard, unsaved bar.
+- `static/boot.js`: Theme applied from server settings on boot.
+- `api/config.py`: `theme` field in `_SETTINGS_DEFAULTS` (no enum gate).
+- `THEMES.md`: Full documentation for creating custom themes.
+
+### Tests
+- 9 new tests in `test_sprint26.py`: default theme, round-trip persistence for
+  all 6 built-in themes, custom theme acceptance, settings isolation.
+  Total: **433 tests**.
+
+---
+
 ## [v0.33] /insights Sync + state.db Bridge Fix
 *April 5, 2026 | 424 tests*
 
@@ -1152,4 +1188,4 @@ Three-panel layout: sessions sidebar, chat area, workspace panel.
 
 ---
 
-*Last updated: v0.32, April 5, 2026 | Tests: 424*
+*Last updated: v0.34, April 5, 2026 | Tests: 433*

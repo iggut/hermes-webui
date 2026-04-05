@@ -10,7 +10,7 @@ const COMMANDS=[
   {name:'workspace', desc:'Switch workspace by name',            fn:cmdWorkspace, arg:'name'},
   {name:'new',       desc:'Start a new chat session',            fn:cmdNew},
   {name:'usage',     desc:'Toggle token usage display on/off',   fn:cmdUsage},
-  {name:'theme',     desc:'Switch theme (dark/light/solarized/monokai/nord)', fn:cmdTheme, arg:'name'},
+  {name:'theme',     desc:'Switch theme (dark/light/slate/solarized/monokai/nord)', fn:cmdTheme, arg:'name'},
 ];
 
 function parseCommand(text){
@@ -124,7 +124,7 @@ async function cmdUsage(){
 }
 
 async function cmdTheme(args){
-  const themes=['dark','slate','solarized','monokai','nord'];
+  const themes=['dark','light','slate','solarized','monokai','nord'];
   if(!args||!themes.includes(args.toLowerCase())){
     showToast('Usage: /theme '+themes.join('|'));
     return;
