@@ -1,5 +1,31 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.38] feat: mobile nav cleanup, Prism syntax highlighting, zh-CN/zh-Hant i18n
+
+Three community contributions combined:
+
+**PR #425 — Remove mobile bottom nav (@aronprins)**
+The fixed iOS-style bottom navigation bar on phones has been removed. The sidebar drawer
+tabs already handle all navigation — the bottom nav was redundant and consumed ~56px of
+vertical chat space. `test_mobile_layout.py` updated with `test_mobile_bottom_nav_removed()`
+and new sidebar nav coverage tests.
+
+**PR #426 — Prism syntax highlighting with light + dark theme token colors (@GiggleSamurai)**
+Fenced code blocks now emit `class="language-{lang}"` on `<code>` elements, enabling Prism's
+autoloader to apply token-level syntax highlighting. Added 36-line `:root[data-theme="light"]`
+token color overrides scoped to light theme only; dark/dim/monokai/nord themes unaffected.
+Background guard uses `var(--code-bg) !important` to prevent Prism's dark background from
+overriding theme variables. 2 new regression tests in `test_issue_code_syntax_highlight.py`.
+
+**PR #428 — zh-CN/zh-Hant i18n hardening (@vansour)**
+Pluggable `resolvePreferredLocale()` function with smart zh-CN/zh-SG/zh-TW/zh-HK variant
+mapping. Full zh-Simplified and zh-Traditional locale blocks added to `i18n.js`. Login page
+locale routing updated in `api/routes.py` (`_resolve_login_locale_key()` helper). Hardcoded
+strings in `panels.js` cron UI extracted to i18n keys. 3 new test files:
+`test_chinese_locale.py`, `test_language_precedence.py`, `test_login_locale.py`.
+
+- Total tests: 1073 (was 1063)
+
 ## [v0.50.37] fix(onboarding): skip wizard when Hermes is already configured
 
 Fixes #420 — existing Hermes users with a valid `config.yaml` were shown the first-run
