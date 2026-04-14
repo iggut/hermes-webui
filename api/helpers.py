@@ -45,7 +45,7 @@ def _security_headers(handler):
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-        "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "
+        "img-src 'self' data:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self'; "
         "base-uri 'self'; form-action 'self'"
     )
     handler.send_header(
