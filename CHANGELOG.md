@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.51] — 2026-04-15
+
+### Fixed
+- **Orphaned tool messages** — conversation histories containing `role: tool` messages with no matching `tool_call_id` in a prior assistant message are now silently stripped before sending to the provider API. Fixes 400 errors from strictly-conformant providers (Mercury-2/Inception, newer OpenAI models). Adds 13 regression tests. (Fixes #534)
+
 ## [v0.50.50] — 2026-04-15
 
 ### Fixed
