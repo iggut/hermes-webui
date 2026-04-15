@@ -97,10 +97,9 @@ function toggleCronForm(){
     _renderCronSkillTags();
     const search=$('cronFormSkillSearch');
     if(search)search.value='';
-    // Pre-fetch skills for the picker
-    if(!_cronSkillsCache){
-      api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[];}).catch(()=>{});
-    }
+    // Always re-fetch skills to avoid stale cache
+    _cronSkillsCache=null;
+    api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[];}).catch(()=>{});
     $('cronFormName').focus();
   }
 }
@@ -485,6 +484,7 @@ async function submitSkillSave() {
     await api('/api/skills/save', {method:'POST', body: JSON.stringify({name, category: category||undefined, content})});
     showToast(_editingSkillName ? t('skill_updated') : t('skill_created'));
     _skillsData = null;
+    _cronSkillsCache = null;
     toggleSkillForm();
     await loadSkills();
   } catch(e) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
