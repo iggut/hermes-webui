@@ -952,18 +952,37 @@ def get_available_models() -> dict:
     # 3b. Include models from custom_providers config entries.
     # These are explicitly configured and should always appear even when the
     # /v1/models endpoint is unreachable or returns a subset.
+    #
+    # Each entry may carry a `name` field (e.g. "Agent37").  When present we
+    # use it as the dropdown section header instead of the generic "Custom"
+    # label.  Internally we key these providers as "custom:<slug>" so that
+    # multiple named custom providers can coexist as separate groups.
     _custom_providers_cfg = cfg.get("custom_providers", [])
+    # Maps "custom:<slug>" -> (display_name, [model_dicts])
+    _named_custom_groups: dict = {}
     if isinstance(_custom_providers_cfg, list):
         _seen_custom_ids = {m["id"] for m in auto_detected_models}
         for _cp in _custom_providers_cfg:
             if not isinstance(_cp, dict):
                 continue
             _cp_model = _cp.get("model", "")
+            _cp_name = (_cp.get("name") or "").strip()
             if _cp_model and _cp_model not in _seen_custom_ids:
                 _cp_label = _cp_model.split("/")[-1] if "/" in _cp_model else _cp_model
-                auto_detected_models.append({"id": _cp_model, "label": _cp_label})
                 _seen_custom_ids.add(_cp_model)
-                detected_providers.add("custom")
+                if _cp_name:
+                    # Named custom provider — own group keyed by slug
+                    _slug = "custom:" + _cp_name.lower().replace(" ", "-")
+                    if _slug not in _named_custom_groups:
+                        _named_custom_groups[_slug] = (_cp_name, [])
+                        detected_providers.add(_slug)
+                    _named_custom_groups[_slug][1].append(
+                        {"id": _cp_model, "label": _cp_label}
+                    )
+                else:
+                    # Unnamed — falls into the generic "Custom" bucket
+                    auto_detected_models.append({"id": _cp_model, "label": _cp_label})
+                    detected_providers.add("custom")
 
     # If the user configured a real model.provider, the base_url belongs to
     # THAT provider, not to a separate "Custom" group. hermes_cli reports
@@ -975,10 +994,34 @@ def get_available_models() -> dict:
     _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
     if active_provider and active_provider != "custom" and not _has_custom_providers:
         detected_providers.discard("custom")
+        # Also drop named custom slugs when active provider is a real named one
+        # and there are no custom_providers entries to show.
+        for _slug in list(detected_providers):
+            if _slug.startswith("custom:") and not _has_custom_providers:
+                detected_providers.discard(_slug)
+    elif active_provider == "custom" and _has_custom_providers:
+        # When the active provider is 'custom' and all custom_providers entries
+        # are named (i.e. every entry produced a "custom:<slug>" key), the bare
+        # "custom" bucket is empty noise — discard it so the dropdown only shows
+        # the named groups.  We keep "custom" if there are unnamed entries (they
+        # were added to auto_detected_models and will render under the generic
+        # "Custom" header via the else branch in the group builder).
+        _has_unnamed = any(
+            isinstance(_cp, dict) and not (_cp.get("name") or "").strip()
+            for _cp in _custom_providers_cfg
+        )
+        if not _has_unnamed:
+            detected_providers.discard("custom")
 
     # 5. Build model groups
     if detected_providers:
         for pid in sorted(detected_providers):
+            if pid.startswith("custom:") and pid in _named_custom_groups:
+                # Named custom provider — use the stored display name and its own model list
+                _nc_display, _nc_models = _named_custom_groups[pid]
+                if _nc_models:
+                    groups.append({"provider": _nc_display, "models": _nc_models})
+                continue
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
             if pid == "openrouter":
                 # OpenRouter uses provider/model format -- show the fallback list
