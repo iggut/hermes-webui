@@ -81,7 +81,7 @@ def test_russian_locale_includes_representative_translations():
     src = read(REPO / "static" / "i18n.js")
     expected = [
         "settings_title: '\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438'",
-        "login_title: '\u0412\u043e\u0439\u0442\u0438'",
+        "login_title: '\u0412\u0445\u043e\u0434'",
         "approval_heading: '\u0422\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435'",
         "tab_tasks: '\u0417\u0430\u0434\u0430\u0447\u0438'",
         "tab_profiles: '\u041f\u0440\u043e\u0444\u0438\u043b\u0438'",

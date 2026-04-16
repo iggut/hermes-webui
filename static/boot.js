@@ -103,11 +103,11 @@ function syncWorkspacePanelUI(){
   if(toggleBtn){
     toggleBtn.classList.toggle('active',isOpen);
     toggleBtn.setAttribute('aria-pressed',isOpen?'true':'false');
-    toggleBtn.title=isOpen?'Скрыть панель файлов':'Показать панель файлов';
+    toggleBtn.title=isOpen?'Hide workspace panel':'Show workspace panel';
     toggleBtn.disabled=!canBrowse;
   }
   if(collapseBtn){
-    collapseBtn.title=isCompact?'Закрыть панель файлов':'Скрыть панель файлов';
+    collapseBtn.title=isCompact?'Close workspace panel':'Hide workspace panel';
   }
   const hasSession=!!S.session;
   ['btnUpDir','btnNewFile','btnNewFolder','btnRefreshPanel'].forEach(id=>{
@@ -117,7 +117,7 @@ function syncWorkspacePanelUI(){
   const clearBtn=$('btnClearPreview');
   if(clearBtn){
     clearBtn.disabled=!isOpen;
-    clearBtn.title=hasPreview?'Закрыть предпросмотр':'Скрыть панель файлов';
+    clearBtn.title=hasPreview?'Close preview':'Hide workspace panel';
     // On desktop, only show the X button when a file preview is open.
     // In browse mode the chevron (btnCollapseWorkspacePanel) already serves
     // as the close control, so showing both produces a duplicate X.
@@ -578,7 +578,7 @@ function applyBotName(){
   const topbarTitle=$('topbarTitle');
   if(topbarTitle && (!S.session)) topbarTitle.textContent=name;
   const msg=$('msg');
-  if(msg) msg.placeholder='Сообщение '+name+'\u2026';
+  if(msg) msg.placeholder='Message '+name+'\u2026';
 }
 
 (async()=>{
@@ -634,7 +634,7 @@ function applyBotName(){
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=((S.activeProfile||'default')==='default'?'По умолчанию':(S.activeProfile||'default'));
+  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   // Fetch available models from server and populate dropdown dynamically
   await populateModelDropdown();
   // Restore last-used model preference

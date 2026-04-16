@@ -363,7 +363,7 @@ async function loadSkills() {
     const data = await api('/api/skills');
     _skillsData = data.skills || [];
     renderSkills(_skillsData);
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Ошибка: ${esc(e.message)}</div>`; }
+  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
 }
 
 function renderSkills(skills) {
