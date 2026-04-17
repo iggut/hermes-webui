@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.78] — 2026-04-17
+
+### Fixed
+- **Gemma 4 thinking tokens no longer shown raw in chat** — added `<|turn>thinking\n...<turn|>` to the streaming think-token parser in `static/messages.js` and `_strip_thinking_markup()` in `api/streaming.py`. Previously Gemma 4's reasoning output appeared as raw text prepended to the answer. (Closes #607)
+
 ## [v0.50.76] — 2026-04-17
 
 ### Fixed
