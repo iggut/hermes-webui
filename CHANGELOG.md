@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.79] — 2026-04-17
+
+### Fixed
+- **Default model no longer shows as "(unavailable)" for non-OpenAI users** — changed the hardcoded fallback `DEFAULT_MODEL` from `openai/gpt-5.4-mini` to `""` (empty). When no default model is configured, the WebUI now defers to the active provider's own default instead of pre-selecting an OpenAI model that most providers don't have. Users who want a specific default can still set `HERMES_WEBUI_DEFAULT_MODEL` env var or pick a model in Preferences. (Closes #646)
+
 ## [v0.50.76] — 2026-04-17
 
 ### Fixed
