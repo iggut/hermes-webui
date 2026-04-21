@@ -1077,6 +1077,7 @@ let _settingsThemeOnOpen = null; // track theme at open time for discard revert
 let _settingsSkinOnOpen = null; // track skin at open time for discard revert
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
+let _courierEnrollmentParsed = null;
 
 function switchSettingsSection(name){
   const section=(name==='appearance'||name==='preferences'||name==='system')?name:'conversation';
@@ -1389,6 +1390,75 @@ async function saveSettings(andClose){
     _hideSettingsPanel();
   }catch(e){
     showToast(t('settings_save_failed')+e.message);
+  }
+}
+
+function _setCourierPairingStatus(message, isError){
+  const el=$('courierPairingStatus');
+  if(!el) return;
+  el.textContent=message||'';
+  el.style.color=isError?'var(--accent)':'var(--muted)';
+}
+
+function _setCourierPairingSummary(enrollment){
+  const el=$('courierPairingSummary');
+  if(!el) return;
+  if(!enrollment){
+    el.style.display='none';
+    el.textContent='';
+    return;
+  }
+  el.style.display='';
+  el.textContent=`Enrollment summary
+gatewayUrl: ${enrollment.gatewayUrl}
+deviceId: ${enrollment.deviceId}
+publicKeyFingerprint: ${enrollment.publicKeyFingerprint}
+appVersion: ${enrollment.appVersion}
+issuedAt: ${enrollment.issuedAt}`;
+}
+
+async function parseCourierEnrollmentPayload(){
+  const input=$('courierEnrollmentPayload');
+  const payload=((input&&input.value)||'').trim();
+  if(!payload){
+    _setCourierPairingStatus('Paste an enrollment payload first.',true);
+    _courierEnrollmentParsed=null;
+    _setCourierPairingSummary(null);
+    return;
+  }
+  try{
+    const data=await api('/api/courier/pairing/parse',{
+      method:'POST',
+      body:JSON.stringify({payload})
+    });
+    _courierEnrollmentParsed=data.enrollment||null;
+    _setCourierPairingSummary(_courierEnrollmentParsed);
+    _setCourierPairingStatus('Enrollment payload validated.',false);
+  }catch(e){
+    _courierEnrollmentParsed=null;
+    _setCourierPairingSummary(null);
+    _setCourierPairingStatus(`Validation failed: ${e.message}`,true);
+  }
+}
+
+async function generateCourierPairingPayload(){
+  const out=$('courierPairingOutput');
+  if(!out) return;
+  try{
+    const data=await api('/api/courier/pairing/generate',{
+      method:'POST',
+      body:JSON.stringify({
+        enrollment:_courierEnrollmentParsed
+      })
+    });
+    out.style.display='';
+    out.textContent=data.pairingUri||'';
+    const warning=data.warning?` ${data.warning}`:'';
+    _setCourierPairingStatus(`Pairing payload generated.${warning}`,false);
+  }catch(e){
+    out.style.display='none';
+    out.textContent='';
+    _setCourierPairingStatus(`Pairing generation failed: ${e.message}`,true);
   }
 }
 

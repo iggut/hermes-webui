@@ -603,6 +603,18 @@
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
               <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
             </div>
+            <div class="settings-field courier-pairing" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
+              <label for="courierEnrollmentPayload">Courier device pairing</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Paste the Android enrollment payload, validate it, then generate a gateway payload for pairing.</div>
+              <textarea id="courierEnrollmentPayload" rows="4" placeholder="hermes-courier-enroll://gateway?gatewayUrl=..." style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;resize:vertical"></textarea>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button class="sm-btn" onclick="parseCourierEnrollmentPayload()">Validate payload</button>
+                <button class="sm-btn" onclick="generateCourierPairingPayload()">Generate pairing payload</button>
+              </div>
+              <div id="courierPairingStatus" style="font-size:11px;color:var(--muted);margin-top:8px"></div>
+              <pre id="courierPairingSummary" style="display:none;margin-top:8px;background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px;white-space:pre-wrap;font-size:11px;color:var(--text)"></pre>
+              <pre id="courierPairingOutput" style="display:none;margin-top:8px;background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px;white-space:pre-wrap;font-size:11px;color:var(--text)"></pre>
+            </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
           </div>

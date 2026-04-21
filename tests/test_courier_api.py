@@ -119,3 +119,56 @@ def test_courier_conversation_post_returns_fast_unsupported_when_runtime_unavail
     if payload["status"] == "unsupported":
         assert payload["supported"] is False
         assert elapsed < 6.0
+
+
+def test_courier_pairing_parse_accepts_android_enrollment_uri(base_url):
+    payload = (
+        "hermes-courier-enroll://gateway?"
+        "gatewayUrl=https%3A%2F%2Fgateway.example&"
+        "deviceId=android-courier-pixel&"
+        "publicKeyFingerprint=abc123&"
+        "appVersion=0.1.0&"
+        "issuedAt=2026-04-21T00%3A00%3A00Z"
+    )
+    code, data = _request(
+        base_url,
+        "POST",
+        "/api/courier/pairing/parse",
+        body={"payload": payload},
+    )
+    assert code == 200
+    assert data["ok"] is True
+    assert data["enrollment"]["gatewayUrl"] == "https://gateway.example"
+    assert data["enrollment"]["deviceId"] == "android-courier-pixel"
+
+
+def test_courier_pairing_parse_rejects_missing_required_fields(base_url):
+    code, data = _request(
+        base_url,
+        "POST",
+        "/api/courier/pairing/parse",
+        body={"payload": '{"gatewayUrl":"https://gateway.example"}'},
+    )
+    assert code == 400
+    assert "Missing required field" in data["error"]
+
+
+def test_courier_pairing_generate_returns_compatible_uri(base_url):
+    enrollment = {
+        "gatewayUrl": "https://gateway.example",
+        "deviceId": "android-courier-pixel",
+        "publicKeyFingerprint": "abc123",
+        "appVersion": "0.1.0",
+        "issuedAt": "2026-04-21T00:00:00Z",
+    }
+    code, data = _request(
+        base_url,
+        "POST",
+        "/api/courier/pairing/generate",
+        body={"enrollment": enrollment},
+    )
+    assert code == 200
+    assert data["ok"] is True
+    assert data["pairingUri"].startswith("hermes-courier-enroll://gateway?")
+    assert "gatewayUrl=https%3A%2F%2Fgateway.example" in data["pairingUri"]
+    assert data["pairingPayload"]["courierMode"] == "bearer-token"

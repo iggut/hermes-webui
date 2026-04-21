@@ -66,6 +66,7 @@ from api.courier_routes import (
     handle_courier_post,
     validate_courier_auth,
 )
+from api.courier_pairing import build_pairing_payload, parse_enrollment_payload
 
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
 import re as _re
@@ -566,6 +567,16 @@ def handle_get(handler, parsed) -> bool:
         except Exception:
             pass
         return j(handler, settings)
+
+    if parsed.path == "/api/courier/pairing/status":
+        return j(
+            handler,
+            {
+                "bearerTokenConfigured": bool(
+                    os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
+                )
+            },
+        )
 
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
@@ -1279,6 +1290,26 @@ def handle_post(handler, parsed) -> bool:
         handler.end_headers()
         handler.wfile.write(response_body)
         return True
+
+    if parsed.path == "/api/courier/pairing/parse":
+        raw_payload = body.get("payload", "")
+        try:
+            parsed_payload = parse_enrollment_payload(raw_payload)
+        except ValueError as e:
+            return bad(handler, str(e))
+        return j(handler, {"ok": True, "enrollment": parsed_payload})
+
+    if parsed.path == "/api/courier/pairing/generate":
+        include_bearer = bool(body.get("include_bearer", True))
+        enrollment = body.get("enrollment")
+        try:
+            result = build_pairing_payload(
+                enrollment_payload=enrollment if isinstance(enrollment, dict) else None,
+                include_bearer=include_bearer,
+            )
+        except ValueError as e:
+            return bad(handler, str(e))
+        return j(handler, {"ok": True, **result})
 
     if parsed.path == "/api/onboarding/setup":
         # Writing API keys to disk - restrict to local/private networks unless auth is active.
