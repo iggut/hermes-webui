@@ -61,6 +61,11 @@ from api.helpers import (
     redact_session_data,
     _redact_text,
 )
+from api.courier_routes import (
+    handle_courier_get,
+    handle_courier_post,
+    validate_courier_auth,
+)
 
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
 import re as _re
@@ -468,6 +473,11 @@ button:hover{background:rgba(124,185,255,.25)}
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    if parsed.path.startswith("/v1/"):
+        auth_result = validate_courier_auth(handler)
+        if auth_result is not None:
+            return auth_result
+        return handle_courier_get(handler, parsed)
 
     if parsed.path in ("/", "/index.html"):
         return t(
@@ -869,6 +879,13 @@ def handle_get(handler, parsed) -> bool:
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    if parsed.path.startswith("/v1/"):
+        auth_result = validate_courier_auth(handler)
+        if auth_result is not None:
+            return auth_result
+        body = read_body(handler)
+        return handle_courier_post(handler, parsed, body)
+
     # CSRF: reject cross-origin browser requests
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
