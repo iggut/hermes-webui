@@ -23,6 +23,8 @@ REQUIRED_FIELDS = (
     "appVersion",
     "issuedAt",
 )
+PAIRING_CONTRACT_VERSION = "2026-04-21"
+PAIRING_MODE = "token-only"
 
 
 def _as_trimmed_str(payload: dict, key: str) -> str:
@@ -104,6 +106,9 @@ def build_pairing_payload(enrollment_payload: dict | None = None, include_bearer
         "appVersion": (enrollment or {}).get("appVersion", ""),
         "issuedAt": now_iso,
         "courierMode": "bearer-token",
+        "pairingMode": PAIRING_MODE,
+        "pairingContractVersion": PAIRING_CONTRACT_VERSION,
+        "apiBasePath": "/v1",
     }
     if token_included:
         query["bearerToken"] = bearer_token
@@ -115,6 +120,9 @@ def build_pairing_payload(enrollment_payload: dict | None = None, include_bearer
         "pairingPayload": query,
         "tokenIncluded": token_included,
         "pairingQrDataUrl": _build_pairing_qr_data_url(pairing_uri),
+        "pairingMode": PAIRING_MODE,
+        "pairingContractVersion": PAIRING_CONTRACT_VERSION,
+        "postScanBootstrapSupported": False,
     }
     if include_bearer and not token_included:
         result["warning"] = "Bearer token is not configured in WebUI environment."

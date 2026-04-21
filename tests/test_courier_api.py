@@ -3,6 +3,7 @@ import time
 import urllib.error
 import urllib.request
 
+from api.courier_routes import courier_runtime_status
 from tests.conftest import make_session_tracked
 
 
@@ -174,10 +175,16 @@ def test_courier_pairing_generate_returns_compatible_uri(base_url):
     assert data["pairingUri"].startswith("hermes-courier-enroll://gateway?")
     assert "gatewayUrl=https%3A%2F%2Fgateway.example" in data["pairingUri"]
     assert data["pairingPayload"]["courierMode"] == "bearer-token"
+    assert data["pairingPayload"]["pairingMode"] == "token-only"
+    assert data["pairingPayload"]["pairingContractVersion"] == "2026-04-21"
+    assert data["pairingPayload"]["apiBasePath"] == "/v1"
     assert data["pairingPayload"]["bearerToken"] == COURIER_TOKEN
     assert data["tokenIncluded"] is True
     assert data["pairingPayload"]["bearerToken"] == COURIER_TOKEN
     assert data["pairingQrDataUrl"].startswith("data:image/svg+xml")
+    assert data["pairingMode"] == "token-only"
+    assert data["pairingContractVersion"] == "2026-04-21"
+    assert data["postScanBootstrapSupported"] is False
 
 
 
@@ -186,8 +193,12 @@ def test_courier_pairing_status_reports_token_backed_availability(base_url):
     assert code == 200
     assert data["bearerTokenConfigured"] is True
     assert data["tokenBackedPairingAvailable"] is True
+    assert data["pairingMode"] == "token-only"
+    assert data["qrPairingAvailable"] is True
+    assert data["postScanBootstrapAvailable"] is False
     assert data["courierEnabled"] is True
     assert isinstance(data["issues"], list)
+    assert isinstance(data["unavailableReasons"], list)
 
 
 def test_courier_pairing_generate_status_matches_payload(base_url):
@@ -207,7 +218,22 @@ def test_courier_v1_status_reports_runtime_state(base_url):
     assert payload["auth"]["bearerTokenConfigured"] is True
     assert payload["auth"]["courierEnabled"] is True
     assert payload["pairing"]["tokenBackedPairingAvailable"] is True
+    assert payload["pairing"]["pairingMode"] == "token-only"
+    assert payload["pairing"]["qrPairingAvailable"] is True
+    assert payload["pairing"]["postScanBootstrapAvailable"] is False
     assert "runtime" in payload
+
+
+def test_courier_pairing_status_reports_missing_env_reasons(monkeypatch):
+    monkeypatch.delenv("HERMES_COURIER_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("HERMES_COURIER_ENABLE", "0")
+    status = courier_runtime_status()
+    pairing = status["pairing"]
+    assert pairing["tokenBackedPairingAvailable"] is False
+    assert pairing["qrPairingAvailable"] is False
+    assert pairing["pairingMode"] == "unavailable"
+    assert pairing["postScanBootstrapAvailable"] is False
+    assert any("HERMES_COURIER_BEARER_TOKEN is not set." in item for item in pairing["unavailableReasons"])
 
 
 def test_courier_approval_decision_response_has_stable_shape(base_url, cleanup_test_sessions):

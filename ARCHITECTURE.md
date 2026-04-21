@@ -136,6 +136,23 @@ Courier Android backend runtime checks:
     GET /api/courier/pairing/status   Operator-facing pairing/config health details
     GET /v1/status                    Courier gateway auth/runtime readiness for mobile diagnostics
 
+Courier scan-and-done pairing contract (token-only mode):
+
+    - Pairing URI scheme: hermes-courier-enroll://gateway
+    - Required QR query fields:
+        gatewayUrl, deviceId, publicKeyFingerprint, appVersion, issuedAt
+    - Pairing contract fields:
+        courierMode=bearer-token
+        pairingMode=token-only
+        pairingContractVersion=2026-04-21
+        apiBasePath=/v1
+        bearerToken=<required for scan-and-done>
+    - Post-scan bootstrap endpoint is intentionally not used in this mode.
+    - Readiness/status source:
+        GET /api/courier/pairing/status
+        -> pairingMode, qrPairingAvailable, tokenBackedPairingAvailable,
+           postScanBootstrapAvailable, unavailableReasons
+
 Test isolation environment variables (set by conftest.py):
 
     HERMES_WEBUI_PORT=8788                           Isolated test port

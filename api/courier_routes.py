@@ -58,6 +58,8 @@ def courier_runtime_status() -> dict:
         issues.append("HERMES_COURIER_ENABLE is disabled.")
     if runtime_issue:
         issues.append(f"Agent runtime unavailable: {runtime_issue}")
+    token_pairing_ready = bool(token and enabled)
+    pairing_mode = "token-only" if token_pairing_ready else "unavailable"
     return {
         "endpoint": "/v1",
         "auth": {
@@ -66,7 +68,12 @@ def courier_runtime_status() -> dict:
             "courierEnabled": enabled,
         },
         "pairing": {
-            "tokenBackedPairingAvailable": bool(token and enabled),
+            "tokenBackedPairingAvailable": token_pairing_ready,
+            "pairingMode": pairing_mode,
+            "pairingContractVersion": "2026-04-21",
+            "qrPairingAvailable": token_pairing_ready,
+            "postScanBootstrapAvailable": False,
+            "unavailableReasons": issues,
         },
         "runtime": {
             "available": runtime_issue is None,

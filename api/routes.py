@@ -577,6 +577,11 @@ def handle_get(handler, parsed) -> bool:
                 "courierEnabled": status["auth"]["courierEnabled"],
                 "bearerTokenConfigured": status["auth"]["bearerTokenConfigured"],
                 "tokenBackedPairingAvailable": status["pairing"]["tokenBackedPairingAvailable"],
+                "pairingMode": status["pairing"]["pairingMode"],
+                "pairingContractVersion": status["pairing"]["pairingContractVersion"],
+                "qrPairingAvailable": status["pairing"]["qrPairingAvailable"],
+                "postScanBootstrapAvailable": status["pairing"]["postScanBootstrapAvailable"],
+                "unavailableReasons": status["pairing"]["unavailableReasons"],
                 "issues": status["issues"],
             },
         )
