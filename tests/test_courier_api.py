@@ -3,6 +3,11 @@ import time
 import urllib.error
 import urllib.request
 
+from api.courier_pairing import (
+    build_pairing_payload,
+    courier_pairing_deployment_snapshot,
+    resolve_courier_gateway_for_pairing,
+)
 from api.courier_routes import courier_runtime_status
 from tests.conftest import make_session_tracked
 
@@ -197,6 +202,13 @@ def test_courier_pairing_status_reports_token_backed_availability(base_url):
     assert data["qrPairingAvailable"] is True
     assert data["postScanBootstrapAvailable"] is False
     assert data["courierEnabled"] is True
+    assert data["defaultPairingGatewayUrl"] == "http://127.0.0.1:8787"
+    assert data["gatewayUrlSource"] == "default_local"
+    assert data["externalBaseUrlConfigured"] is False
+    assert data["externalBaseUrl"] == ""
+    assert data["tailscaleProfileReady"] is False
+    assert data["pairingUrlMode"] == "local"
+    assert isinstance(data["pairingWarnings"], list)
     assert isinstance(data["issues"], list)
     assert isinstance(data["unavailableReasons"], list)
 
@@ -221,6 +233,10 @@ def test_courier_v1_status_reports_runtime_state(base_url):
     assert payload["pairing"]["pairingMode"] == "token-only"
     assert payload["pairing"]["qrPairingAvailable"] is True
     assert payload["pairing"]["postScanBootstrapAvailable"] is False
+    assert payload["pairing"]["defaultPairingGatewayUrl"] == "http://127.0.0.1:8787"
+    assert payload["pairing"]["pairingUrlMode"] == "local"
+    assert payload["pairing"]["tailscaleProfileReady"] is False
+    assert isinstance(payload["pairing"]["pairingWarnings"], list)
     assert "runtime" in payload
 
 
@@ -233,7 +249,71 @@ def test_courier_pairing_status_reports_missing_env_reasons(monkeypatch):
     assert pairing["qrPairingAvailable"] is False
     assert pairing["pairingMode"] == "unavailable"
     assert pairing["postScanBootstrapAvailable"] is False
+    assert pairing["pairingUrlMode"] == "unavailable"
     assert any("HERMES_COURIER_BEARER_TOKEN is not set." in item for item in pairing["unavailableReasons"])
+
+
+def test_external_base_url_overrides_pairing_gateway_url(monkeypatch):
+    monkeypatch.setenv("HERMES_COURIER_EXTERNAL_BASE_URL", "https://myhost.mytailnet.ts.net")
+    monkeypatch.setenv("HERMES_COURIER_BEARER_TOKEN", "tok")
+    monkeypatch.setenv("HERMES_COURIER_ENABLE", "1")
+    out = build_pairing_payload(None, include_bearer=True)
+    assert out["pairingPayload"]["gatewayUrl"] == "https://myhost.mytailnet.ts.net"
+    assert out["gatewayUrlSource"] == "external"
+    assert out["pairingPayload"]["gatewayUrl"] == "https://myhost.mytailnet.ts.net"
+
+
+def test_external_base_wins_over_legacy_gateway_url(monkeypatch):
+    monkeypatch.setenv("HERMES_COURIER_EXTERNAL_BASE_URL", "https://a.ts.net")
+    monkeypatch.setenv("HERMES_COURIER_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("HERMES_COURIER_BEARER_TOKEN", "tok")
+    r = resolve_courier_gateway_for_pairing(None)
+    assert r["gatewayUrl"] == "https://a.ts.net"
+    assert r["gatewayUrlSource"] == "external"
+
+
+def test_deployment_snapshot_tailscale_profile_ready(monkeypatch):
+    monkeypatch.setenv("HERMES_COURIER_EXTERNAL_BASE_URL", "https://router.tailabc.ts.net")
+    monkeypatch.setenv("HERMES_COURIER_BEARER_TOKEN", "tok")
+    monkeypatch.setenv("HERMES_COURIER_ENABLE", "1")
+    snap = courier_pairing_deployment_snapshot()
+    assert snap["tailscaleProfileReady"] is True
+    assert snap["pairingUrlMode"] == "tailnet"
+    assert snap["defaultPairingGatewayUrl"] == "https://router.tailabc.ts.net"
+
+
+def test_deployment_snapshot_warns_on_http_external(monkeypatch):
+    monkeypatch.setenv("HERMES_COURIER_EXTERNAL_BASE_URL", "http://insecure.example.ts.net")
+    monkeypatch.setenv("HERMES_COURIER_BEARER_TOKEN", "tok")
+    monkeypatch.setenv("HERMES_COURIER_ENABLE", "1")
+    snap = courier_pairing_deployment_snapshot()
+    assert snap["tailscaleProfileReady"] is False
+    assert any("https" in w.lower() for w in snap["pairingWarnings"])
+
+
+def test_token_configured_local_mode_when_external_missing(monkeypatch):
+    monkeypatch.delenv("HERMES_COURIER_EXTERNAL_BASE_URL", raising=False)
+    monkeypatch.setenv("HERMES_COURIER_BEARER_TOKEN", "tok")
+    monkeypatch.setenv("HERMES_COURIER_ENABLE", "1")
+    snap = courier_pairing_deployment_snapshot()
+    assert snap["pairingUrlMode"] == "local"
+    assert snap["tailscaleProfileReady"] is False
+    assert any("EXTERNAL" in w or "tailnet" in w.lower() for w in snap["pairingWarnings"])
+
+
+def test_enrollment_gateway_still_wins_over_external(monkeypatch):
+    monkeypatch.setenv("HERMES_COURIER_EXTERNAL_BASE_URL", "https://from-env.ts.net")
+    r = resolve_courier_gateway_for_pairing(
+        {
+            "gatewayUrl": "https://from-device.example/gw",
+            "deviceId": "d",
+            "publicKeyFingerprint": "a",
+            "appVersion": "1",
+            "issuedAt": "2026-01-01T00:00:00Z",
+        }
+    )
+    assert r["gatewayUrl"] == "https://from-device.example/gw"
+    assert r["gatewayUrlSource"] == "enrollment"
 
 
 def test_courier_approval_decision_response_has_stable_shape(base_url, cleanup_test_sessions):

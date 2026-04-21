@@ -128,13 +128,47 @@ Environment variables controlling behavior:
     HERMES_HOME                    Base directory for Hermes state (~/.hermes by default)
     HERMES_COURIER_ENABLE          Enable `/v1/*` Courier adapter (set `1` for Android backend use)
     HERMES_COURIER_BEARER_TOKEN    Required bearer token for Courier Android clients
-    HERMES_COURIER_GATEWAY_URL     Optional explicit gateway URL embedded in pairing payloads
+    HERMES_COURIER_EXTERNAL_BASE_URL  Authoritative Courier gateway base for pairing QR (private tailnet
+                                   https://<machine>.<tailnet>.ts.net from Tailscale Serve). Overrides
+                                   HERMES_COURIER_GATEWAY_URL when set. Omitted in local-only setups.
+    HERMES_COURIER_GATEWAY_URL     Legacy optional gateway URL; used only if EXTERNAL is unset
+    HERMES_COURIER_PRODUCTION      Set to `1` to surface stricter operator warnings (e.g. loopback in prod)
     HERMES_COURIER_CONVERSATION_TIMEOUT_SECONDS  Optional `/v1/conversation` sync timeout (default: 15, max: 60)
 
 Courier Android backend runtime checks:
 
     GET /api/courier/pairing/status   Operator-facing pairing/config health details
     GET /v1/status                    Courier gateway auth/runtime readiness for mobile diagnostics
+
+**Tailnet (Tailscale Serve) production shape**
+
+WebUI continues to listen on `127.0.0.1:8787`. Expose it only to your tailnet with
+[Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve) so Android reaches a
+**private** `https://…ts.net` URL, not the public internet.
+
+1. Start WebUI as usual (loopback). Set `HERMES_COURIER_ENABLE=1` and
+   `HERMES_COURIER_BEARER_TOKEN` to a long random secret.
+2. On the same host, run something like:  
+   `tailscale serve --bg https / http://127.0.0.1:8787`  
+   (Use the exact syntax for your `tailscale` version; the goal is TLS on the tailnet
+   hostname with HTTP to the local WebUI.)
+3. Set `HERMES_COURIER_EXTERNAL_BASE_URL` to the **https** URL Serve prints (e.g.
+   `https://myhost.tailabc.ts.net` — your tailnet’s MagicDNS name).
+4. Restart WebUI so the process picks up the new env. Pairing QR and text will embed
+   that URL as `gatewayUrl`.
+
+**Verify**
+
+- `curl -sS -H "Authorization: Bearer <token>" https://<host>.<tailnet>.ts.net/v1/status`
+  should return JSON with `"tailscaleProfileReady": true` and `"pairingUrlMode": "tailnet"`
+  when the external URL is set, uses `https`, and is not loopback.
+- In the WebUI settings Courier section, the pairing status line lists warnings if the
+  URL is `http:`, points at `localhost`, or `HERMES_COURIER_EXTERNAL_BASE_URL` is missing.
+
+**Readiness fields (pairing):** `defaultPairingGatewayUrl`, `gatewayUrlSource` (`default_local`
+| `external` | `legacy_env` | `enrollment` in generate responses), `externalBaseUrlConfigured`,
+`tailscaleProfileReady`, `pairingUrlMode` (`unavailable` | `local` | `tailnet`), and
+`pairingWarnings` (operator-facing strings).
 
 Courier scan-and-done pairing contract (token-only mode):
 

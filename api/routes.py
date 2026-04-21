@@ -571,18 +571,28 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/courier/pairing/status":
         status = courier_runtime_status()
+        pairing = status["pairing"]
         return j(
             handler,
             {
                 "courierEnabled": status["auth"]["courierEnabled"],
                 "bearerTokenConfigured": status["auth"]["bearerTokenConfigured"],
-                "tokenBackedPairingAvailable": status["pairing"]["tokenBackedPairingAvailable"],
-                "pairingMode": status["pairing"]["pairingMode"],
-                "pairingContractVersion": status["pairing"]["pairingContractVersion"],
-                "qrPairingAvailable": status["pairing"]["qrPairingAvailable"],
-                "postScanBootstrapAvailable": status["pairing"]["postScanBootstrapAvailable"],
-                "unavailableReasons": status["pairing"]["unavailableReasons"],
+                "tokenBackedPairingAvailable": pairing["tokenBackedPairingAvailable"],
+                "pairingMode": pairing["pairingMode"],
+                "pairingContractVersion": pairing["pairingContractVersion"],
+                "qrPairingAvailable": pairing["qrPairingAvailable"],
+                "postScanBootstrapAvailable": pairing["postScanBootstrapAvailable"],
+                "unavailableReasons": pairing["unavailableReasons"],
                 "issues": status["issues"],
+                "defaultPairingGatewayUrl": pairing["defaultPairingGatewayUrl"],
+                "gatewayUrlSource": pairing["gatewayUrlSource"],
+                "externalBaseUrlConfigured": pairing["externalBaseUrlConfigured"],
+                "externalBaseUrl": pairing["externalBaseUrl"],
+                "legacyGatewayEnvConfigured": pairing["legacyGatewayEnvConfigured"],
+                "defaultUsesLocalLoopback": pairing["defaultUsesLocalLoopback"],
+                "tailscaleProfileReady": pairing["tailscaleProfileReady"],
+                "pairingUrlMode": pairing["pairingUrlMode"],
+                "pairingWarnings": pairing["pairingWarnings"],
             },
         )
 

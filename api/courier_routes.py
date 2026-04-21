@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from api.config import STREAMS, STREAMS_LOCK
+from api.courier_pairing import courier_pairing_deployment_snapshot
 from api.helpers import bad, j
 from api.models import all_sessions, get_session, new_session
 from api.streaming import _run_agent_streaming
@@ -60,6 +61,7 @@ def courier_runtime_status() -> dict:
         issues.append(f"Agent runtime unavailable: {runtime_issue}")
     token_pairing_ready = bool(token and enabled)
     pairing_mode = "token-only" if token_pairing_ready else "unavailable"
+    deploy = courier_pairing_deployment_snapshot()
     return {
         "endpoint": "/v1",
         "auth": {
@@ -74,6 +76,15 @@ def courier_runtime_status() -> dict:
             "qrPairingAvailable": token_pairing_ready,
             "postScanBootstrapAvailable": False,
             "unavailableReasons": issues,
+            "defaultPairingGatewayUrl": deploy["defaultPairingGatewayUrl"],
+            "gatewayUrlSource": deploy["gatewayUrlSource"],
+            "externalBaseUrlConfigured": deploy["externalBaseUrlConfigured"],
+            "externalBaseUrl": deploy["externalBaseUrl"],
+            "legacyGatewayEnvConfigured": deploy["legacyGatewayEnvConfigured"],
+            "defaultUsesLocalLoopback": deploy["defaultUsesLocalLoopback"],
+            "tailscaleProfileReady": deploy["tailscaleProfileReady"],
+            "pairingUrlMode": deploy["pairingUrlMode"],
+            "pairingWarnings": deploy["pairingWarnings"],
         },
         "runtime": {
             "available": runtime_issue is None,

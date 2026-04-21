@@ -1403,20 +1403,30 @@ function _setCourierPairingStatus(message, isError){
 }
 
 function _renderCourierPairingAvailability(status){
-  const hasToken=!!(status&&status.bearerTokenConfigured);
-  const available=!!(status&&status.tokenBackedPairingAvailable);
   if(!status){
     _setCourierPairingStatus('Courier pairing status unavailable.',true);
     return;
   }
-  if(available&&hasToken){
-    _setCourierPairingStatus('Token-backed Courier pairing is available. Generated payload will include bearerToken.',false);
+  const hasToken=!!status.bearerTokenConfigured;
+  const available=!!status.tokenBackedPairingAvailable;
+  if(!available||!hasToken){
+    _setCourierPairingStatus(
+      'Token-backed Courier pairing is unavailable. Set HERMES_COURIER_BEARER_TOKEN and HERMES_COURIER_ENABLE=1, then restart WebUI.',
+      true
+    );
     return;
   }
-  _setCourierPairingStatus(
-    'Token-backed Courier pairing is unavailable in this WebUI runtime. Set HERMES_COURIER_BEARER_TOKEN and restart WebUI.',
-    true
-  );
+  const parts=[ 'Token-backed pairing is on; generated QR will include the bearer token.' ];
+  if(status.tailscaleProfileReady && status.pairingUrlMode==='tailnet'){
+    parts.push('Tailscale: external https URL is configured; default QR gateway matches tailnet use.');
+  } else if(!status.externalBaseUrlConfigured){
+    parts.push('HERMES_COURIER_EXTERNAL_BASE_URL is unset — QR default is local loopback (useful on this host only; set the tailnet https URL for phone pairing).');
+  } else {
+    parts.push('External base URL is set; verify warnings below for HTTPS/hostname issues.');
+  }
+  const pw=status.pairingWarnings;
+  if(pw&&pw.length) parts.push('Warnings: '+pw.join(' '));
+  _setCourierPairingStatus(parts.join(' '), !!(pw&&pw.length));
 }
 
 async function refreshCourierPairingStatus(){
@@ -1495,7 +1505,7 @@ async function generateCourierPairingPayload(){
     out.textContent='';
     _setCourierPairingQr('');
     _setCourierPairingStatus(
-      'Token-backed Courier pairing is unavailable in this WebUI runtime. Set HERMES_COURIER_BEARER_TOKEN and restart WebUI.',
+      'Token-backed pairing is off. Set HERMES_COURIER_BEARER_TOKEN and HERMES_COURIER_ENABLE=1, then restart WebUI.',
       true
     );
     return;
@@ -1511,7 +1521,8 @@ async function generateCourierPairingPayload(){
     out.textContent=data.pairingUri||'';
     _setCourierPairingQr(data.pairingQrDataUrl||'');
     const tokenState=data.tokenIncluded?'includes bearer token':'does not include bearer token';
-    _setCourierPairingStatus(`Pairing payload generated and ${tokenState}.`,!data.tokenIncluded);
+    const pWarn=(data.pairingWarnings&&data.pairingWarnings.length)?(' '+data.pairingWarnings.join(' ')):'';
+    _setCourierPairingStatus(`Pairing generated (${tokenState}).${pWarn}`,!data.tokenIncluded||!!(data.pairingWarnings&&data.pairingWarnings.length));
   }catch(e){
     out.style.display='none';
     out.textContent='';
