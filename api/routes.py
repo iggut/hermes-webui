@@ -569,12 +569,18 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, settings)
 
     if parsed.path == "/api/courier/pairing/status":
+        bearer_configured = bool(
+            os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
+        )
+        courier_enabled = bool(
+            os.getenv("HERMES_COURIER_ENABLE", "").strip().lower() in ("", "1", "true", "yes", "on")
+        )
         return j(
             handler,
             {
-                "bearerTokenConfigured": bool(
-                    os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
-                )
+                "courierEnabled": courier_enabled,
+                "bearerTokenConfigured": bearer_configured,
+                "tokenBackedPairingAvailable": bearer_configured,
             },
         )
 
@@ -1302,6 +1308,12 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/courier/pairing/generate":
         include_bearer = bool(body.get("include_bearer", True))
         enrollment = body.get("enrollment")
+        if include_bearer and not os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip():
+            return bad(
+                handler,
+                "Token-backed Courier pairing is unavailable: set HERMES_COURIER_BEARER_TOKEN in the running WebUI process.",
+                503,
+            )
         try:
             result = build_pairing_payload(
                 enrollment_payload=enrollment if isinstance(enrollment, dict) else None,

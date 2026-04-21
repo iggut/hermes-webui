@@ -78,6 +78,7 @@ def build_pairing_payload(enrollment_payload: dict | None = None, include_bearer
 
     bearer_token = os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
     token_included = bool(include_bearer and bearer_token)
+    bearer_available = bool(bearer_token)
     now_iso = datetime.now(tz=timezone.utc).isoformat()
 
     query = {
@@ -99,4 +100,6 @@ def build_pairing_payload(enrollment_payload: dict | None = None, include_bearer
     }
     if include_bearer and not token_included:
         result["warning"] = "Bearer token is not configured in WebUI environment."
+    result["bearerTokenConfigured"] = bearer_available
+    result["tokenBackedPairingAvailable"] = bearer_available
     return result

@@ -1078,6 +1078,7 @@ let _settingsSkinOnOpen = null; // track skin at open time for discard revert
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 let _courierEnrollmentParsed = null;
+let _courierPairingRuntimeStatus = null;
 
 function switchSettingsSection(name){
   const section=(name==='appearance'||name==='preferences'||name==='system')?name:'conversation';
@@ -1290,6 +1291,7 @@ async function loadSettingsPanel(){
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
     }catch(e){}
     _syncHermesPanelSessionActions();
+    await refreshCourierPairingStatus();
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
@@ -1400,6 +1402,34 @@ function _setCourierPairingStatus(message, isError){
   el.style.color=isError?'var(--accent)':'var(--muted)';
 }
 
+function _renderCourierPairingAvailability(status){
+  const hasToken=!!(status&&status.bearerTokenConfigured);
+  const available=!!(status&&status.tokenBackedPairingAvailable);
+  if(!status){
+    _setCourierPairingStatus('Courier pairing status unavailable.',true);
+    return;
+  }
+  if(available&&hasToken){
+    _setCourierPairingStatus('Token-backed Courier pairing is available. Generated payload will include bearerToken.',false);
+    return;
+  }
+  _setCourierPairingStatus(
+    'Token-backed Courier pairing is unavailable in this WebUI runtime. Set HERMES_COURIER_BEARER_TOKEN and restart WebUI.',
+    true
+  );
+}
+
+async function refreshCourierPairingStatus(){
+  try{
+    const data=await api('/api/courier/pairing/status');
+    _courierPairingRuntimeStatus=data||null;
+    _renderCourierPairingAvailability(_courierPairingRuntimeStatus);
+  }catch(e){
+    _courierPairingRuntimeStatus=null;
+    _setCourierPairingStatus(`Failed to read Courier pairing status: ${e.message}`,true);
+  }
+}
+
 function _setCourierPairingSummary(enrollment){
   const el=$('courierPairingSummary');
   if(!el) return;
@@ -1444,6 +1474,18 @@ async function parseCourierEnrollmentPayload(){
 async function generateCourierPairingPayload(){
   const out=$('courierPairingOutput');
   if(!out) return;
+  if(!_courierPairingRuntimeStatus){
+    await refreshCourierPairingStatus();
+  }
+  if(!_courierPairingRuntimeStatus||!_courierPairingRuntimeStatus.tokenBackedPairingAvailable){
+    out.style.display='none';
+    out.textContent='';
+    _setCourierPairingStatus(
+      'Token-backed Courier pairing is unavailable in this WebUI runtime. Set HERMES_COURIER_BEARER_TOKEN and restart WebUI.',
+      true
+    );
+    return;
+  }
   try{
     const data=await api('/api/courier/pairing/generate',{
       method:'POST',
@@ -1453,8 +1495,8 @@ async function generateCourierPairingPayload(){
     });
     out.style.display='';
     out.textContent=data.pairingUri||'';
-    const warning=data.warning?` ${data.warning}`:'';
-    _setCourierPairingStatus(`Pairing payload generated.${warning}`,false);
+    const tokenState=data.tokenIncluded?'includes bearer token':'does not include bearer token';
+    _setCourierPairingStatus(`Pairing payload generated and ${tokenState}.`,!data.tokenIncluded);
   }catch(e){
     out.style.display='none';
     out.textContent='';
