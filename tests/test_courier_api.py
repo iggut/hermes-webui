@@ -1,4 +1,5 @@
 import json
+import time
 import urllib.error
 import urllib.request
 
@@ -99,3 +100,22 @@ def test_courier_conversation_and_events_reachability(base_url, cleanup_test_ses
     code, events = _request(base_url, "GET", "/v1/events", bearer=COURIER_TOKEN)
     assert code == 426
     assert events["supported"] is False
+
+
+def test_courier_conversation_post_returns_fast_unsupported_when_runtime_unavailable(base_url, cleanup_test_sessions):
+    sid, _ = make_session_tracked(cleanup_test_sessions)
+    started = time.monotonic()
+    code, payload = _request(
+        base_url,
+        "POST",
+        "/v1/conversation",
+        body={"sessionId": sid, "body": "ping"},
+        bearer=COURIER_TOKEN,
+    )
+    elapsed = time.monotonic() - started
+    assert code == 200
+    assert payload["status"] in {"ok", "unsupported"}
+    assert isinstance(payload["body"], str) and payload["body"].strip()
+    if payload["status"] == "unsupported":
+        assert payload["supported"] is False
+        assert elapsed < 6.0

@@ -9,6 +9,7 @@ import datetime as _dt
 import json
 import os
 import queue
+import shutil
 import threading
 import time
 import uuid
@@ -157,6 +158,27 @@ def _conversation_events_for_session(session_id: str, limit: int = 40) -> list[d
     return events
 
 
+def _conversation_send_payload(
+    session_id: str,
+    *,
+    status: str,
+    body: str,
+    supported: bool,
+    detail: str = "",
+) -> dict:
+    payload = {
+        "eventId": f"{session_id}:{int(time.time())}:{status}",
+        "author": "Hermes",
+        "body": body,
+        "timestamp": _iso_timestamp(time.time()),
+        "status": status,
+        "supported": supported,
+    }
+    if detail:
+        payload["detail"] = detail
+    return payload
+
+
 def _list_pending_approvals() -> list[dict]:
     out = []
     with _lock:
@@ -180,7 +202,7 @@ def _list_pending_approvals() -> list[dict]:
     return out
 
 
-def _run_sync_turn(session_id: str, message: str, timeout_seconds: float = 8.0):
+def _run_sync_turn(session_id: str, message: str, timeout_seconds: float = 3.0):
     if _get_ai_agent() is None:
         raise RuntimeError("agent runtime unavailable")
     s = get_session(session_id)
@@ -213,6 +235,32 @@ def _run_sync_turn(session_id: str, message: str, timeout_seconds: float = 8.0):
     if not done_session:
         raise RuntimeError("Conversation turn did not complete in time")
     return done_session
+
+
+def _courier_runtime_unavailable_reason() -> str | None:
+    if _get_ai_agent() is None:
+        return "agent runtime unavailable"
+    try:
+        from api.config import get_effective_default_model, resolve_model_provider
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        default_model = get_effective_default_model()
+        _, requested_provider, _ = resolve_model_provider(default_model)
+        runtime = resolve_runtime_provider(requested=requested_provider)
+        if not isinstance(runtime, dict):
+            return "runtime provider unresolved"
+        api_key = str(runtime.get("api_key") or "").strip()
+        acp_cmd = str(runtime.get("command") or "").strip()
+        if not api_key and not acp_cmd:
+            return "runtime credentials unavailable"
+        if acp_cmd:
+            cmd_bin = acp_cmd.split()[0]
+            resolved = shutil.which(cmd_bin)
+            if resolved is None and not (Path(cmd_bin).exists() and os.access(cmd_bin, os.X_OK)):
+                return f"runtime command unavailable: {cmd_bin}"
+    except Exception as exc:
+        return f"runtime bootstrap unavailable: {exc}"
+    return None
 
 
 def handle_courier_get(handler, parsed) -> bool:
@@ -347,17 +395,30 @@ def handle_courier_post(handler, parsed, body) -> bool:
                 sid = sessions[0]["session_id"]
             else:
                 sid = new_session().session_id
+        runtime_unavailable = _courier_runtime_unavailable_reason()
+        if runtime_unavailable:
+            return j(
+                handler,
+                _conversation_send_payload(
+                    sid,
+                    status="unsupported",
+                    body=f"Conversation send unsupported in current runtime: {runtime_unavailable}",
+                    supported=False,
+                    detail=runtime_unavailable,
+                ),
+            )
         try:
             done_session = _run_sync_turn(sid, body_text)
         except Exception as exc:
             return j(
                 handler,
-                {
-                    "eventId": f"{sid}:{int(time.time())}:unsupported",
-                    "author": "Hermes",
-                    "body": f"Conversation send unsupported in current runtime: {exc}",
-                    "timestamp": _iso_timestamp(time.time()),
-                },
+                _conversation_send_payload(
+                    sid,
+                    status="unsupported",
+                    body=f"Conversation send unsupported in current runtime: {exc}",
+                    supported=False,
+                    detail=str(exc),
+                ),
             )
         messages = done_session.get("messages") or []
         latest_assistant = ""
@@ -366,14 +427,25 @@ def handle_courier_post(handler, parsed, body) -> bool:
                 latest_assistant = _extract_text(msg)
                 if latest_assistant:
                     break
+        if not latest_assistant:
+            return j(
+                handler,
+                _conversation_send_payload(
+                    sid,
+                    status="unsupported",
+                    body="Conversation send unsupported in current runtime: no assistant response was produced.",
+                    supported=False,
+                    detail="no assistant response was produced",
+                ),
+            )
         return j(
             handler,
-            {
-                "eventId": f"{sid}:{int(time.time())}",
-                "author": "Hermes",
-                "body": latest_assistant or "Message accepted.",
-                "timestamp": _iso_timestamp(time.time()),
-            },
+            _conversation_send_payload(
+                sid,
+                status="ok",
+                body=latest_assistant,
+                supported=True,
+            ),
         )
 
     return False
