@@ -47,6 +47,35 @@ def _courier_enabled() -> bool:
     return False
 
 
+def courier_runtime_status() -> dict:
+    token = os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
+    enabled = _courier_enabled()
+    runtime_issue = _courier_runtime_unavailable_reason()
+    issues = []
+    if not token:
+        issues.append("HERMES_COURIER_BEARER_TOKEN is not set.")
+    if not enabled:
+        issues.append("HERMES_COURIER_ENABLE is disabled.")
+    if runtime_issue:
+        issues.append(f"Agent runtime unavailable: {runtime_issue}")
+    return {
+        "endpoint": "/v1",
+        "auth": {
+            "mode": "bearer-token",
+            "bearerTokenConfigured": bool(token),
+            "courierEnabled": enabled,
+        },
+        "pairing": {
+            "tokenBackedPairingAvailable": bool(token and enabled),
+        },
+        "runtime": {
+            "available": runtime_issue is None,
+            "detail": runtime_issue or "",
+        },
+        "issues": issues,
+    }
+
+
 def _auth_error(handler, detail: str, status: int = 401):
     return j(
         handler,
@@ -264,6 +293,9 @@ def _courier_runtime_unavailable_reason() -> str | None:
 
 
 def handle_courier_get(handler, parsed) -> bool:
+    if parsed.path == "/v1/status":
+        return j(handler, courier_runtime_status())
+
     if parsed.path == "/v1/dashboard":
         sessions = all_sessions()
         pending = _list_pending_approvals()
@@ -321,6 +353,8 @@ def handle_courier_get(handler, parsed) -> bool:
                 "detail": "WebSocket realtime is not implemented on Hermes WebUI /v1/events yet.",
                 "supported": False,
                 "endpoint": "/v1/events",
+                "retryable": True,
+                "fallbackPollEndpoints": ["/v1/dashboard", "/v1/approvals", "/v1/conversation"],
             },
             status=426,
         )
@@ -408,7 +442,9 @@ def handle_courier_post(handler, parsed, body) -> bool:
                 ),
             )
         try:
-            done_session = _run_sync_turn(sid, body_text)
+            timeout_seconds = float(os.getenv("HERMES_COURIER_CONVERSATION_TIMEOUT_SECONDS", "15").strip() or "15")
+            timeout_seconds = max(3.0, min(timeout_seconds, 60.0))
+            done_session = _run_sync_turn(sid, body_text, timeout_seconds=timeout_seconds)
         except Exception as exc:
             return j(
                 handler,

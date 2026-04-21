@@ -126,6 +126,15 @@ Environment variables controlling behavior:
     HERMES_WEBUI_DEFAULT_MODEL     Default LLM model string
     HERMES_WEBUI_PASSWORD          Optional: enable password auth (off by default)
     HERMES_HOME                    Base directory for Hermes state (~/.hermes by default)
+    HERMES_COURIER_ENABLE          Enable `/v1/*` Courier adapter (set `1` for Android backend use)
+    HERMES_COURIER_BEARER_TOKEN    Required bearer token for Courier Android clients
+    HERMES_COURIER_GATEWAY_URL     Optional explicit gateway URL embedded in pairing payloads
+    HERMES_COURIER_CONVERSATION_TIMEOUT_SECONDS  Optional `/v1/conversation` sync timeout (default: 15, max: 60)
+
+Courier Android backend runtime checks:
+
+    GET /api/courier/pairing/status   Operator-facing pairing/config health details
+    GET /v1/status                    Courier gateway auth/runtime readiness for mobile diagnostics
 
 Test isolation environment variables (set by conftest.py):
 

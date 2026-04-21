@@ -62,6 +62,7 @@ from api.helpers import (
     _redact_text,
 )
 from api.courier_routes import (
+    courier_runtime_status,
     handle_courier_get,
     handle_courier_post,
     validate_courier_auth,
@@ -569,18 +570,14 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, settings)
 
     if parsed.path == "/api/courier/pairing/status":
-        bearer_configured = bool(
-            os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
-        )
-        courier_enabled = bool(
-            os.getenv("HERMES_COURIER_ENABLE", "").strip().lower() in ("", "1", "true", "yes", "on")
-        )
+        status = courier_runtime_status()
         return j(
             handler,
             {
-                "courierEnabled": courier_enabled,
-                "bearerTokenConfigured": bearer_configured,
-                "tokenBackedPairingAvailable": bearer_configured,
+                "courierEnabled": status["auth"]["courierEnabled"],
+                "bearerTokenConfigured": status["auth"]["bearerTokenConfigured"],
+                "tokenBackedPairingAvailable": status["pairing"]["tokenBackedPairingAvailable"],
+                "issues": status["issues"],
             },
         )
 
@@ -1308,10 +1305,11 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/courier/pairing/generate":
         include_bearer = bool(body.get("include_bearer", True))
         enrollment = body.get("enrollment")
-        if include_bearer and not os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip():
+        status = courier_runtime_status()
+        if include_bearer and not status["pairing"]["tokenBackedPairingAvailable"]:
             return bad(
                 handler,
-                "Token-backed Courier pairing is unavailable: set HERMES_COURIER_BEARER_TOKEN in the running WebUI process.",
+                "Token-backed Courier pairing is unavailable: set HERMES_COURIER_BEARER_TOKEN and HERMES_COURIER_ENABLE=1 in the running WebUI process.",
                 503,
             )
         try:
@@ -1321,6 +1319,7 @@ def handle_post(handler, parsed) -> bool:
             )
         except ValueError as e:
             return bad(handler, str(e))
+        result["pairingQrSourceUri"] = result.get("pairingUri", "")
         return j(handler, {"ok": True, **result})
 
     if parsed.path == "/api/onboarding/setup":
@@ -2686,7 +2685,20 @@ def _handle_approval_respond(handler, body):
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.
     resolve_gateway_approval(sid, choice, resolve_all=False)
-    return j(handler, {"ok": True, "choice": choice})
+    response_payload = {"ok": True, "choice": choice}
+    approval_id = str(body.get("approval_id") or "").strip()
+    if approval_id:
+        action = "approve" if choice in ("once", "session", "always") else "deny"
+        response_payload.update(
+            {
+                "approvalId": approval_id,
+                "action": action,
+                "status": "ok",
+                "detail": "Decision recorded.",
+                "updatedAt": int(time.time()),
+            }
+        )
+    return j(handler, response_payload)
 
 
 def _handle_clarify_respond(handler, body):

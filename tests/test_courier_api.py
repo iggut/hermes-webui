@@ -100,6 +100,8 @@ def test_courier_conversation_and_events_reachability(base_url, cleanup_test_ses
     code, events = _request(base_url, "GET", "/v1/events", bearer=COURIER_TOKEN)
     assert code == 426
     assert events["supported"] is False
+    assert events["retryable"] is True
+    assert events["fallbackPollEndpoints"] == ["/v1/dashboard", "/v1/approvals", "/v1/conversation"]
 
 
 def test_courier_conversation_post_returns_fast_unsupported_when_runtime_unavailable(base_url, cleanup_test_sessions):
@@ -184,6 +186,8 @@ def test_courier_pairing_status_reports_token_backed_availability(base_url):
     assert code == 200
     assert data["bearerTokenConfigured"] is True
     assert data["tokenBackedPairingAvailable"] is True
+    assert data["courierEnabled"] is True
+    assert isinstance(data["issues"], list)
 
 
 def test_courier_pairing_generate_status_matches_payload(base_url):
@@ -192,3 +196,40 @@ def test_courier_pairing_generate_status_matches_payload(base_url):
     code, data = _request(base_url, "POST", "/api/courier/pairing/generate", body={})
     assert code == 200
     assert data["tokenIncluded"] is status["tokenBackedPairingAvailable"]
+    assert data["pairingQrSourceUri"] == data["pairingUri"]
+
+
+def test_courier_v1_status_reports_runtime_state(base_url):
+    code, payload = _request(base_url, "GET", "/v1/status", bearer=COURIER_TOKEN)
+    assert code == 200
+    assert payload["endpoint"] == "/v1"
+    assert payload["auth"]["mode"] == "bearer-token"
+    assert payload["auth"]["bearerTokenConfigured"] is True
+    assert payload["auth"]["courierEnabled"] is True
+    assert payload["pairing"]["tokenBackedPairingAvailable"] is True
+    assert "runtime" in payload
+
+
+def test_courier_approval_decision_response_has_stable_shape(base_url, cleanup_test_sessions):
+    sid, _ = make_session_tracked(cleanup_test_sessions)
+    urllib.request.urlopen(
+        urllib.request.Request(
+            base_url + f"/api/approval/inject_test?session_id={sid}&pattern_key=test_key&command=echo+hello",
+            method="GET",
+        ),
+        timeout=10,
+    ).read()
+    _, approvals = _request(base_url, "GET", "/v1/approvals", bearer=COURIER_TOKEN)
+    approval_id = approvals[0]["approvalId"]
+    code, decision = _request(
+        base_url,
+        "POST",
+        f"/v1/approvals/{approval_id}/decision",
+        body={"decision": "deny"},
+        bearer=COURIER_TOKEN,
+    )
+    assert code == 200
+    assert decision["approvalId"] == approval_id
+    assert decision["action"] == "deny"
+    assert decision["status"] == "ok"
+    assert decision["ok"] is True
