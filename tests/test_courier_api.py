@@ -172,8 +172,11 @@ def test_courier_pairing_generate_returns_compatible_uri(base_url):
     assert data["pairingUri"].startswith("hermes-courier-enroll://gateway?")
     assert "gatewayUrl=https%3A%2F%2Fgateway.example" in data["pairingUri"]
     assert data["pairingPayload"]["courierMode"] == "bearer-token"
+    assert data["pairingPayload"]["bearerToken"] == COURIER_TOKEN
     assert data["tokenIncluded"] is True
     assert data["pairingPayload"]["bearerToken"] == COURIER_TOKEN
+    assert data["pairingQrDataUrl"].startswith("data:image/svg+xml")
+
 
 
 def test_courier_pairing_status_reports_token_backed_availability(base_url):

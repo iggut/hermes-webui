@@ -1447,6 +1447,19 @@ appVersion: ${enrollment.appVersion}
 issuedAt: ${enrollment.issuedAt}`;
 }
 
+function _setCourierPairingQr(dataUrl){
+  const wrap=$('courierPairingQrWrap');
+  const img=$('courierPairingQr');
+  if(!wrap||!img) return;
+  if(!dataUrl){
+    wrap.style.display='none';
+    img.removeAttribute('src');
+    return;
+  }
+  img.src=dataUrl;
+  wrap.style.display='flex';
+}
+
 async function parseCourierEnrollmentPayload(){
   const input=$('courierEnrollmentPayload');
   const payload=((input&&input.value)||'').trim();
@@ -1480,6 +1493,7 @@ async function generateCourierPairingPayload(){
   if(!_courierPairingRuntimeStatus||!_courierPairingRuntimeStatus.tokenBackedPairingAvailable){
     out.style.display='none';
     out.textContent='';
+    _setCourierPairingQr('');
     _setCourierPairingStatus(
       'Token-backed Courier pairing is unavailable in this WebUI runtime. Set HERMES_COURIER_BEARER_TOKEN and restart WebUI.',
       true
@@ -1495,11 +1509,13 @@ async function generateCourierPairingPayload(){
     });
     out.style.display='';
     out.textContent=data.pairingUri||'';
+    _setCourierPairingQr(data.pairingQrDataUrl||'');
     const tokenState=data.tokenIncluded?'includes bearer token':'does not include bearer token';
     _setCourierPairingStatus(`Pairing payload generated and ${tokenState}.`,!data.tokenIncluded);
   }catch(e){
     out.style.display='none';
     out.textContent='';
+    _setCourierPairingQr('');
     _setCourierPairingStatus(`Pairing generation failed: ${e.message}`,true);
   }
 }

@@ -4,10 +4,14 @@ Helpers for Hermes Courier pairing payload parsing/generation.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
+
+import qrcode
+from qrcode.image.svg import SvgImage
 
 
 ENROLLMENT_SCHEME = "hermes-courier-enroll"
@@ -70,6 +74,18 @@ def _parse_enrollment_json(raw: str) -> dict | None:
     return {k: obj.get(k, "") for k in REQUIRED_FIELDS}
 
 
+def _build_pairing_qr_data_url(pairing_uri: str) -> str:
+    """Return a data URL containing an SVG QR code for the pairing URI."""
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=2)
+    qr.add_data(pairing_uri)
+    qr.make(fit=True)
+    image = qr.make_image(image_factory=SvgImage)
+    buffer = io.BytesIO()
+    image.save(buffer)
+    svg = buffer.getvalue().decode("utf-8")
+    return f"data:image/svg+xml;charset=UTF-8,{quote(svg)}"
+
+
 def build_pairing_payload(enrollment_payload: dict | None = None, include_bearer: bool = True) -> dict:
     enrollment = parse_enrollment_payload(json.dumps(enrollment_payload)) if isinstance(enrollment_payload, dict) else None
     gateway_url = (enrollment or {}).get("gatewayUrl") or os.getenv("HERMES_COURIER_GATEWAY_URL", "").strip()
@@ -91,12 +107,14 @@ def build_pairing_payload(enrollment_payload: dict | None = None, include_bearer
     }
     if token_included:
         query["bearerToken"] = bearer_token
+        query["token"] = bearer_token
 
     pairing_uri = f"{ENROLLMENT_SCHEME}://{ENROLLMENT_HOST}?{urlencode(query)}"
     result = {
         "pairingUri": pairing_uri,
         "pairingPayload": query,
         "tokenIncluded": token_included,
+        "pairingQrDataUrl": _build_pairing_qr_data_url(pairing_uri),
     }
     if include_bearer and not token_included:
         result["warning"] = "Bearer token is not configured in WebUI environment."
