@@ -394,16 +394,29 @@ curl http://127.0.0.1:8787/health
 
 ## Redeploying after backend changes (systemd user service)
 
-The `hermes-webui` systemd user unit runs `start.sh` once (`Type=oneshot`) and
-leaves `server.py` detached. It does NOT auto-reload when you `git pull` new
-code. After any change to `api/` or other imported modules, restart so mobile
+The `hermes-webui` systemd user unit runs `server.py` directly in the
+foreground (`Type=simple`, `Restart=always`) so systemd supervises the real
+listener. If the server dies (OOM, crash, reboot) systemd restarts it — the
+unit no longer reports "active (exited)" while nothing is bound to
+`HERMES_WEBUI_PORT`. Tailscale Serve proxies `/` → `127.0.0.1:8787`, so when
+the unit is healthy the tailnet URL serves real data.
+
+After any change to `api/` or other imported modules, restart so mobile
 clients see the new code:
 
 ```bash
 systemctl --user daemon-reload      # only if the unit file itself changed
 systemctl --user restart hermes-webui.service
 ss -tlnp | grep 8787                # confirm the server is back up
+systemctl --user status hermes-webui.service   # should say "active (running)"
 ```
+
+If `ss` shows nothing on `8787` but the unit is "active", the server crashed
+on startup — check `journalctl --user -u hermes-webui.service -n 80`.
+
+**Do not** confuse the production unit with smoke-test runs that set
+`HERMES_WEBUI_PORT=22445` (or any ephemeral port under `/tmp/...`). Only the
+service on `127.0.0.1:8787` is fronted by `tailscale serve`.
 
 Then re-run a live smoke check against the Tailscale URL (same host the mobile
 app talks to) before claiming a backend contract is deployed:
