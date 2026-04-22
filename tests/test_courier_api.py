@@ -485,6 +485,120 @@ def test_enrollment_gateway_still_wins_over_external(monkeypatch):
     assert r["gatewayUrlSource"] == "enrollment"
 
 
+# ── Phase-1 library endpoints (/v1/skills, /v1/memory, /v1/cron, /v1/logs) ──
+#
+# These routes now return real, truthful data sourced from existing WebUI /
+# hermes-agent internals (skills_tool, cron.jobs, ~/.hermes/memories,
+# ~/.hermes/logs) rather than the legacy 404 that the Android client used to
+# treat as `UnavailablePayload`. Tests accept either a list-of-items response
+# or an explicit `UnavailablePayload` so they continue to pass on hosts where
+# the backing module really is missing (e.g. hermes-agent not installed).
+
+
+def _is_unavailable_payload(payload):
+    return (
+        isinstance(payload, dict)
+        and payload.get("supported") is False
+        and str(payload.get("type", "")).endswith("_unavailable")
+    )
+
+
+def test_courier_library_requires_bearer(base_url):
+    for path in ("/v1/skills", "/v1/memory", "/v1/cron", "/v1/logs"):
+        code, payload = _request(base_url, "GET", path)
+        assert code == 401, f"{path} must require bearer auth"
+        assert payload["supported"] is False
+
+
+def test_courier_skills_returns_real_or_unavailable(base_url):
+    code, payload = _request(base_url, "GET", "/v1/skills", bearer=COURIER_TOKEN)
+    assert code == 200
+    if _is_unavailable_payload(payload):
+        assert payload["type"] == "skills_unavailable"
+        assert payload.get("endpoint") == "/v1/skills"
+        return
+    assert isinstance(payload, list)
+    for item in payload:
+        assert {"skillId", "name", "enabled"} <= set(item.keys())
+        assert isinstance(item["skillId"], str) and item["skillId"]
+        assert isinstance(item["name"], str) and item["name"]
+        assert isinstance(item["enabled"], bool)
+        assert isinstance(item.get("description", ""), str)
+        assert isinstance(item.get("scopes", []), list)
+
+
+def test_courier_memory_returns_real_or_unavailable(base_url):
+    code, payload = _request(base_url, "GET", "/v1/memory", bearer=COURIER_TOKEN)
+    assert code == 200
+    if _is_unavailable_payload(payload):
+        assert payload["type"] == "memory_unavailable"
+        return
+    assert isinstance(payload, list)
+    for item in payload:
+        assert {"memoryId", "title", "updatedAt"} <= set(item.keys())
+        assert isinstance(item["memoryId"], str) and item["memoryId"]
+        assert isinstance(item["title"], str)
+        assert isinstance(item.get("tags", []), list)
+        assert isinstance(item.get("pinned", False), bool)
+
+
+def test_courier_cron_returns_real_or_unavailable(base_url):
+    code, payload = _request(base_url, "GET", "/v1/cron", bearer=COURIER_TOKEN)
+    assert code == 200
+    if _is_unavailable_payload(payload):
+        assert payload["type"] == "cron_unavailable"
+        return
+    assert isinstance(payload, list)
+    for item in payload:
+        assert {"cronId", "name", "schedule", "enabled"} <= set(item.keys())
+        assert isinstance(item["cronId"], str) and item["cronId"]
+        assert isinstance(item["enabled"], bool)
+        assert isinstance(item["schedule"], str)
+
+
+def test_courier_logs_returns_real_or_unavailable(base_url):
+    code, payload = _request(base_url, "GET", "/v1/logs?limit=25", bearer=COURIER_TOKEN)
+    assert code == 200
+    if _is_unavailable_payload(payload):
+        assert payload["type"] == "logs_unavailable"
+        return
+    assert isinstance(payload, list)
+    assert len(payload) <= 25
+    for item in payload:
+        assert {"logId", "severity", "timestamp", "message"} <= set(item.keys())
+        assert item["severity"] in {"debug", "info", "warn", "error"}
+        assert isinstance(item["message"], str)
+
+
+def test_courier_logs_severity_filter_rejects_other_levels(base_url):
+    code, payload = _request(
+        base_url, "GET", "/v1/logs?limit=50&severity=error", bearer=COURIER_TOKEN
+    )
+    assert code == 200
+    if _is_unavailable_payload(payload):
+        return
+    assert isinstance(payload, list)
+    for item in payload:
+        assert item["severity"] == "error"
+
+
+def test_courier_library_unavailable_payload_shape_is_android_compatible():
+    """Regression guard: the shape emitted for genuinely unavailable subsystems
+    MUST be parseable by the Android client's `JSONObject.toUnavailableOrNull`.
+    That helper requires `supported == false` and a `type` ending in
+    `_unavailable`, and optionally parses `endpoint` and
+    `fallbackPollEndpoints`. This avoids re-introducing the old pre-Phase-1
+    404 behaviour that showed up in the app as a broken red capability card.
+    """
+    from api.courier_library import _unavailable
+
+    payload = _unavailable("skills", "demo", "/v1/skills", ["/v1/dashboard"])
+    assert payload["supported"] is False
+    assert payload["type"].endswith("_unavailable")
+    assert payload["endpoint"] == "/v1/skills"
+    assert payload["fallbackPollEndpoints"] == ["/v1/dashboard"]
+
+
 def test_courier_approval_decision_response_has_stable_shape(base_url, cleanup_test_sessions):
     sid, _ = make_session_tracked(cleanup_test_sessions)
     urllib.request.urlopen(

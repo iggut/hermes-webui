@@ -18,6 +18,7 @@ from urllib.parse import parse_qs
 
 from api.config import STREAMS, STREAMS_LOCK
 from api.courier_events import handle_courier_events_get
+from api.courier_library import handle_courier_library_get
 from api.courier_pairing import courier_pairing_deployment_snapshot
 from api.helpers import bad, j
 from api.models import all_sessions, get_session, new_session
@@ -366,6 +367,9 @@ def handle_courier_get(handler, parsed) -> bool:
 
     if parsed.path == "/v1/events":
         return handle_courier_events_get(handler)
+
+    if handle_courier_library_get(handler, parsed):
+        return True
 
     return False
 
