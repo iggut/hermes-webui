@@ -392,6 +392,38 @@ curl http://127.0.0.1:8787/health
 
 ---
 
+## Redeploying after backend changes (systemd user service)
+
+The `hermes-webui` systemd user unit runs `start.sh` once (`Type=oneshot`) and
+leaves `server.py` detached. It does NOT auto-reload when you `git pull` new
+code. After any change to `api/` or other imported modules, restart so mobile
+clients see the new code:
+
+```bash
+systemctl --user daemon-reload      # only if the unit file itself changed
+systemctl --user restart hermes-webui.service
+ss -tlnp | grep 8787                # confirm the server is back up
+```
+
+Then re-run a live smoke check against the Tailscale URL (same host the mobile
+app talks to) before claiming a backend contract is deployed:
+
+```bash
+BASE=https://your-host.your-tailnet.ts.net
+AUTH="Authorization: Bearer $HERMES_COURIER_BEARER_TOKEN"
+curl -sk -o /dev/null -w "events plain: %{http_code}\n" -H "$AUTH" $BASE/v1/events
+curl -sk -o /dev/null -w "events ws:    %{http_code}\n" --http1.1 -H "$AUTH" \
+    -H "Connection: Upgrade" -H "Upgrade: websocket" \
+    -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+    --max-time 2 $BASE/v1/events
+```
+
+Expect `events plain: 200` and `events ws: 101`. A `426 Upgrade Required` or
+`events_unavailable` payload means the old (pre-WebSocket) `server.py` is still
+running — restart the unit.
+
+---
+
 ## Running tests
 
 Tests discover the repo and the Hermes agent dynamically -- no hardcoded paths.
