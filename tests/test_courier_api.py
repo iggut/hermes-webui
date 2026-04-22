@@ -14,26 +14,27 @@ from api.courier_pairing import (
     courier_pairing_deployment_snapshot,
     resolve_courier_gateway_for_pairing,
 )
-from api.courier_routes import courier_runtime_status
+from api.courier_routes import courier_runtime_status, _conversation_send_error_payload
 from tests.conftest import make_session_tracked
 
 
-def _import_seeded_session(base_url, cleanup_list, title: str, user_body: str) -> str:
-    """Create a session with pre-populated user messages via /api/session/import.
+def _import_seeded_session(base_url, cleanup_list, title: str, user_body: str, extra_messages: list[dict] | None = None) -> str:
+    """Create a session with pre-populated messages via /api/session/import.
 
     Used to exercise the session-scoped conversation contract without a
     working agent runtime (the runtime is unavailable in the hermetic test
     subprocess so POST /v1/conversation cannot persist real messages).
     Returns the new session id.
     """
+    messages = [{"role": "user", "content": user_body, "timestamp": time.time()}]
+    if extra_messages:
+        messages.extend(extra_messages)
     req = urllib.request.Request(
         base_url + "/api/session/import",
         data=json.dumps(
             {
                 "title": title,
-                "messages": [
-                    {"role": "user", "content": user_body, "timestamp": time.time()},
-                ],
+                "messages": messages,
             }
         ).encode("utf-8"),
         headers={"Content-Type": "application/json"},
@@ -167,6 +168,45 @@ def test_courier_conversation_and_events_reachability(base_url, cleanup_test_ses
     assert conversation["sessionId"], "Realtime conversation event must carry a sessionId"
     assert conversation["body"]
 
+
+def test_courier_conversation_exposes_reasoning_and_tool_calls(base_url, cleanup_test_sessions):
+    sid = _import_seeded_session(
+        base_url,
+        cleanup_test_sessions,
+        title="Reasoning and tool-call exposure",
+        user_body="please inspect the plan",
+        extra_messages=[
+            {
+                "role": "assistant",
+                "content": "Working through the request.",
+                "reasoning": "I need to inspect the plan before changing anything.",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "list_files",
+                            "arguments": "{\"path\":\"/tmp\"}",
+                        },
+                    }
+                ],
+                "timestamp": time.time(),
+            },
+        ],
+    )
+
+    code, payload = _request(base_url, "GET", f"/v1/conversation?sessionId={sid}", bearer=COURIER_TOKEN)
+    assert code == 200
+    assistant_events = [event for event in payload if event["author"] == "Hermes"]
+    assert assistant_events, "Expected the assistant event to be present"
+    assistant = assistant_events[-1]
+    assert assistant["reasoning"] == "I need to inspect the plan before changing anything."
+    assert assistant["toolCalls"] == [
+        {
+            "id": "call_1",
+            "name": "list_files",
+            "arguments": "{\"path\":\"/tmp\"}",
+        }
+    ]
 
 def test_courier_conversation_get_filters_by_session_id(base_url, cleanup_test_sessions):
     sid_a = _import_seeded_session(
@@ -384,6 +424,17 @@ def test_courier_conversation_post_returns_fast_unsupported_when_runtime_unavail
         assert payload["supported"] is False
         assert elapsed < 6.0
 
+
+def test_courier_conversation_timeout_is_reported_as_timeout():
+    payload = _conversation_send_error_payload(
+        "session-123",
+        RuntimeError("Conversation turn did not complete in time"),
+        timeout_seconds=60,
+    )
+    assert payload["status"] == "timeout"
+    assert payload["supported"] is False
+    assert payload["body"] == "Conversation send timed out after 60 seconds."
+    assert payload["detail"] == "Conversation turn did not complete in time"
 
 def test_courier_pairing_parse_accepts_android_enrollment_uri(base_url):
     payload = (

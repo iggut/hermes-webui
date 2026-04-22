@@ -133,12 +133,17 @@ Environment variables controlling behavior:
                                    HERMES_COURIER_GATEWAY_URL when set. Omitted in local-only setups.
     HERMES_COURIER_GATEWAY_URL     Legacy optional gateway URL; used only if EXTERNAL is unset
     HERMES_COURIER_PRODUCTION      Set to `1` to surface stricter operator warnings (e.g. loopback in prod)
-    HERMES_COURIER_CONVERSATION_TIMEOUT_SECONDS  Optional `/v1/conversation` sync timeout (default: 15, max: 60)
+    HERMES_COURIER_CONVERSATION_TIMEOUT_SECONDS  Optional `/v1/conversation` sync timeout (default: 60, max: 60)
 
 Courier Android backend runtime checks:
 
     GET /api/courier/pairing/status   Operator-facing pairing/config health details
     GET /v1/status                    Courier gateway auth/runtime readiness for mobile diagnostics
+
+Courier conversation events may include optional assistant-only metadata:
+
+    reasoning   Free-text thinking/reasoning text when the backend captured it
+    toolCalls   Structured tool-call summaries with name, id, and arguments
 
 **Tailnet (Tailscale Serve) production shape**
 

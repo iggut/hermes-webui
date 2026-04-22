@@ -181,6 +181,66 @@ def _extract_text(message: dict) -> str:
     return str(content or "").strip()
 
 
+def _extract_reasoning(message: dict) -> str:
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning.strip()
+    content = message.get("content", "")
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            ptype = str(part.get("type") or "").lower()
+            if ptype in ("thinking", "reasoning"):
+                parts.append(str(part.get("text") or part.get("content") or "").strip())
+        return "\n".join(p for p in parts if p).strip()
+    return ""
+
+
+def _extract_tool_calls(message: dict) -> list[dict]:
+    calls: list[dict] = []
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+            args = fn.get("arguments") if isinstance(fn, dict) else tc.get("arguments")
+            if isinstance(args, dict):
+                try:
+                    args_text = json.dumps(args, ensure_ascii=False)
+                except Exception:
+                    args_text = str(args)
+            else:
+                args_text = str(args or "")
+            calls.append({
+                "id": str(tc.get("id") or tc.get("call_id") or "").strip(),
+                "name": str((fn or {}).get("name") or tc.get("name") or "tool").strip(),
+                "arguments": args_text,
+            })
+        return calls
+    content = message.get("content", "")
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict) or str(part.get("type") or "").lower() != "tool_use":
+                continue
+            args = part.get("input") or part.get("arguments") or {}
+            if isinstance(args, dict):
+                try:
+                    args_text = json.dumps(args, ensure_ascii=False)
+                except Exception:
+                    args_text = str(args)
+            else:
+                args_text = str(args or "")
+            calls.append({
+                "id": str(part.get("id") or part.get("tool_use_id") or "").strip(),
+                "name": str(part.get("name") or "tool").strip(),
+                "arguments": args_text,
+            })
+    return calls
+
+
 def _conversation_events_for_session(session_id: str, limit: int = 40) -> list[dict]:
     try:
         s = get_session(session_id)
@@ -196,15 +256,20 @@ def _conversation_events_for_session(session_id: str, limit: int = 40) -> list[d
         body = _extract_text(msg)
         if not body:
             continue
-        events.append(
-            {
-                "sessionId": session_id,
-                "eventId": f"{session_id}:{idx}",
-                "author": "You" if role == "user" else ("Hermes" if role == "assistant" else role),
-                "body": body,
-                "timestamp": _iso_timestamp(msg.get("timestamp") or msg.get("_ts") or s.updated_at),
-            }
-        )
+        event = {
+            "sessionId": session_id,
+            "eventId": f"{session_id}:{idx}",
+            "author": "You" if role == "user" else ("Hermes" if role == "assistant" else role),
+            "body": body,
+            "timestamp": _iso_timestamp(msg.get("timestamp") or msg.get("_ts") or s.updated_at),
+        }
+        reasoning = _extract_reasoning(msg)
+        if reasoning:
+            event["reasoning"] = reasoning
+        tool_calls = _extract_tool_calls(msg)
+        if tool_calls:
+            event["toolCalls"] = tool_calls
+        events.append(event)
     return events
 
 
@@ -239,6 +304,24 @@ def _conversation_send_payload(
     if detail:
         payload["detail"] = detail
     return payload
+
+
+def _conversation_send_error_payload(session_id: str, exc: Exception, timeout_seconds: float) -> dict:
+    detail = str(exc).strip() or exc.__class__.__name__
+    lowered = detail.lower()
+    if isinstance(exc, TimeoutError) or "did not complete in time" in lowered or "timed out" in lowered:
+        status = "timeout"
+        body = f"Conversation send timed out after {int(round(timeout_seconds))} seconds."
+    else:
+        status = "failed"
+        body = f"Conversation send failed in current runtime: {detail}"
+    return _conversation_send_payload(
+        session_id,
+        status=status,
+        body=body,
+        supported=False,
+        detail=detail,
+    )
 
 
 def _list_pending_approvals() -> list[dict]:
@@ -551,19 +634,13 @@ def handle_courier_post(handler, parsed, body) -> bool:
                 ),
             )
         try:
-            timeout_seconds = float(os.getenv("HERMES_COURIER_CONVERSATION_TIMEOUT_SECONDS", "15").strip() or "15")
+            timeout_seconds = float(os.getenv("HERMES_COURIER_CONVERSATION_TIMEOUT_SECONDS", "60").strip() or "60")
             timeout_seconds = max(3.0, min(timeout_seconds, 60.0))
             done_session = _run_sync_turn(sid, body_text, timeout_seconds=timeout_seconds)
         except Exception as exc:
             return j(
                 handler,
-                _conversation_send_payload(
-                    sid,
-                    status="unsupported",
-                    body=f"Conversation send unsupported in current runtime: {exc}",
-                    supported=False,
-                    detail=str(exc),
-                ),
+                _conversation_send_error_payload(sid, exc, timeout_seconds),
             )
         messages = done_session.get("messages") or []
         latest_assistant = ""
