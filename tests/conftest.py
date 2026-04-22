@@ -299,6 +299,9 @@ def test_server():
         "HERMES_BASE_HOME":               str(TEST_STATE_DIR),
         "HERMES_COURIER_BEARER_TOKEN":    "test-courier-token",
         "HERMES_COURIER_ENABLE":          "1",
+        # Opt in to the disposable approval-seed route so mutating smoke /
+        # contract tests can exercise `POST /v1/approvals/{id}/decision`.
+        "HERMES_COURIER_ENABLE_APPROVAL_SEED": "1",
         # Isolate from operator/CI env so pairing tests always see default local gateway
         # when the test server does not configure a tailnet URL.
         "HERMES_COURIER_EXTERNAL_BASE_URL": "",

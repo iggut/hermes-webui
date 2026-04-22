@@ -1,7 +1,13 @@
+import base64
+import hashlib
 import json
+import os
+import socket
+import struct
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 from api.courier_pairing import (
     build_pairing_payload,
@@ -103,11 +109,174 @@ def test_courier_conversation_and_events_reachability(base_url, cleanup_test_ses
     assert code == 200
     assert isinstance(payload, list)
 
+    # Without a WebSocket upgrade, /v1/events serves a JSON snapshot with the
+    # same shape as a RealtimeEventEnvelope so plain HTTP callers get a real,
+    # useful response instead of the old 426 unsupported stub.
     code, events = _request(base_url, "GET", "/v1/events", bearer=COURIER_TOKEN)
-    assert code == 426
-    assert events["supported"] is False
-    assert events["retryable"] is True
-    assert events["fallbackPollEndpoints"] == ["/v1/dashboard", "/v1/approvals", "/v1/conversation"]
+    assert code == 200
+    assert events["supported"] is True
+    assert events["transport"] == "snapshot"
+    assert events["endpoint"] == "/v1/events"
+    assert events["type"].startswith("snapshot")
+    assert isinstance(events.get("sessions"), list)
+    assert isinstance(events.get("approvals"), list)
+    assert isinstance(events.get("dashboard"), dict)
+    assert "activeSessionCount" in events["dashboard"]
+
+
+def _ws_handshake(base_url: str, path: str, bearer: str):
+    """Minimal RFC 6455 client: opens a TCP socket, sends the upgrade,
+    reads the 101 response + the first text frame, then closes.
+    """
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        f"Authorization: Bearer {bearer}\r\n"
+        "\r\n"
+    ).encode("ascii")
+    sock = socket.create_connection((host, port), timeout=10)
+    sock.sendall(request)
+
+    buf = b""
+    deadline = time.monotonic() + 10
+    while b"\r\n\r\n" not in buf and time.monotonic() < deadline:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    head, _, rest = buf.partition(b"\r\n\r\n")
+    head_text = head.decode("iso-8859-1")
+    status_line = head_text.split("\r\n", 1)[0]
+    headers = {}
+    for line in head_text.split("\r\n")[1:]:
+        if ":" in line:
+            k, _, v = line.partition(":")
+            headers[k.strip().lower()] = v.strip()
+
+    # Read at least one full frame from `rest` (plus more bytes if needed).
+    while len(rest) < 2 and time.monotonic() < deadline:
+        more = sock.recv(4096)
+        if not more:
+            break
+        rest += more
+    frame_payload = None
+    opcode = None
+    if len(rest) >= 2:
+        b0 = rest[0]
+        b1 = rest[1]
+        opcode = b0 & 0x0F
+        length = b1 & 0x7F
+        offset = 2
+        if length == 126:
+            while len(rest) < offset + 2:
+                rest += sock.recv(4096)
+            length = struct.unpack(">H", rest[offset : offset + 2])[0]
+            offset += 2
+        elif length == 127:
+            while len(rest) < offset + 8:
+                rest += sock.recv(4096)
+            length = struct.unpack(">Q", rest[offset : offset + 8])[0]
+            offset += 8
+        while len(rest) < offset + length and time.monotonic() < deadline:
+            more = sock.recv(4096)
+            if not more:
+                break
+            rest += more
+        frame_payload = rest[offset : offset + length]
+
+    sock.close()
+    return status_line, headers, key, opcode, frame_payload
+
+
+def test_courier_events_websocket_upgrade_returns_real_snapshot(base_url, cleanup_test_sessions):
+    make_session_tracked(cleanup_test_sessions)
+    status_line, headers, sent_key, opcode, frame = _ws_handshake(
+        base_url, "/v1/events", COURIER_TOKEN
+    )
+    assert status_line.startswith("HTTP/1.1 101")
+    assert headers.get("upgrade", "").lower() == "websocket"
+    assert headers.get("connection", "").lower() == "upgrade"
+    expected_accept = base64.b64encode(
+        hashlib.sha1(
+            (sent_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+        ).digest()
+    ).decode("ascii")
+    assert headers.get("sec-websocket-accept") == expected_accept
+    assert opcode == 0x1, f"expected text frame, got opcode {opcode!r}"
+    assert frame is not None and len(frame) > 0
+    envelope = json.loads(frame.decode("utf-8"))
+    assert envelope["type"].startswith("snapshot")
+    assert "dashboard" in envelope
+    assert "sessions" in envelope
+    assert "approvals" in envelope
+
+
+def test_courier_events_websocket_requires_bearer(base_url):
+    # Bearer token missing → 401 JSON response before upgrade even starts.
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 80
+    request = (
+        "GET /v1/events HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {base64.b64encode(os.urandom(16)).decode('ascii')}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n"
+    ).encode("ascii")
+    sock = socket.create_connection((host, port), timeout=5)
+    sock.sendall(request)
+    buf = b""
+    deadline = time.monotonic() + 5
+    while b"\r\n\r\n" not in buf and time.monotonic() < deadline:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    sock.close()
+    status_line = buf.split(b"\r\n", 1)[0].decode("iso-8859-1")
+    assert " 401 " in status_line, f"expected 401 response, got: {status_line!r}"
+
+
+def test_courier_debug_seed_creates_decidable_approval(base_url, cleanup_test_sessions):
+    sid, _ = make_session_tracked(cleanup_test_sessions)
+    code, seeded = _request(
+        base_url,
+        "POST",
+        "/v1/approvals/_debug_seed",
+        body={"sessionId": sid, "title": "Seeded smoke approval", "command": "echo smoke"},
+        bearer=COURIER_TOKEN,
+    )
+    assert code == 200
+    assert seeded["ok"] is True
+    assert seeded["sessionId"] == sid
+    approval_id = seeded["approvalId"]
+    assert approval_id
+
+    code, approvals = _request(base_url, "GET", "/v1/approvals", bearer=COURIER_TOKEN)
+    assert code == 200
+    assert any(item["approvalId"] == approval_id for item in approvals)
+
+    code, decision = _request(
+        base_url,
+        "POST",
+        f"/v1/approvals/{approval_id}/decision",
+        body={"decision": "approve"},
+        bearer=COURIER_TOKEN,
+    )
+    assert code == 200
+    assert decision["status"] == "ok"
+    assert decision["action"] == "approve"
+    assert decision["approvalId"] == approval_id
 
 
 def test_courier_conversation_post_returns_fast_unsupported_when_runtime_unavailable(base_url, cleanup_test_sessions):

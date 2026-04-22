@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from api.config import STREAMS, STREAMS_LOCK
+from api.courier_events import handle_courier_events_get
 from api.courier_pairing import courier_pairing_deployment_snapshot
 from api.helpers import bad, j
 from api.models import all_sessions, get_session, new_session
@@ -364,23 +365,96 @@ def handle_courier_get(handler, parsed) -> bool:
         return j(handler, _conversation_events_for_session(sid))
 
     if parsed.path == "/v1/events":
-        return j(
-            handler,
-            {
-                "type": "events_unavailable",
-                "detail": "WebSocket realtime is not implemented on Hermes WebUI /v1/events yet.",
-                "supported": False,
-                "endpoint": "/v1/events",
-                "retryable": True,
-                "fallbackPollEndpoints": ["/v1/dashboard", "/v1/approvals", "/v1/conversation"],
-            },
-            status=426,
-        )
+        return handle_courier_events_get(handler)
 
     return False
 
 
+def _courier_approval_seed_enabled() -> bool:
+    """Seed route is OFF unless the operator explicitly opts in.
+
+    We intentionally keep this gated behind its own env flag so a paired
+    mobile app cannot inject pending approvals against a production
+    deployment without the operator knowing about it.
+    """
+    raw = os.getenv("HERMES_COURIER_ENABLE_APPROVAL_SEED", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _handle_courier_approval_seed(handler, body: dict):
+    """Inject a disposable pending approval so mobile clients can exercise the
+    approvals list and the `POST /v1/approvals/{id}/decision` path end to end.
+
+    The seeded entry is indistinguishable from a real pending approval except
+    for the ``_debug: True`` marker, and is removed from ``_pending`` the
+    moment any caller posts a decision against it (same cleanup path as
+    real approvals). No agent is waiting on it, so the decision is a no-op
+    other than recording the outcome in the approval subsystem.
+    """
+    if not _courier_enabled():
+        return _auth_error(
+            handler,
+            "Courier API disabled. Set HERMES_COURIER_ENABLE=1 to enable.",
+            status=503,
+        )
+    if not _courier_approval_seed_enabled():
+        return j(
+            handler,
+            {
+                "error": "Approval seed disabled",
+                "detail": (
+                    "Set HERMES_COURIER_ENABLE_APPROVAL_SEED=1 to allow "
+                    "disposable approval creation through /v1/approvals/_debug_seed."
+                ),
+                "supported": False,
+                "endpoint": "/v1/approvals/_debug_seed",
+            },
+            status=403,
+        )
+
+    sid = str(body.get("sessionId") or body.get("session_id") or "").strip()
+    if not sid:
+        sid = _resolve_target_session_id("")
+    if not sid:
+        sessions = all_sessions()
+        sid = sessions[0]["session_id"] if sessions else new_session().session_id
+
+    title = str(body.get("title") or "Courier debug approval").strip() or "Courier debug approval"
+    command = str(body.get("command") or "echo hermes-courier-debug-approval").strip()
+    pattern_key = str(body.get("patternKey") or body.get("pattern_key") or "courier_debug").strip() or "courier_debug"
+
+    from api.routes import submit_pending as _submit_pending  # local import avoids circular load
+    approval_id = uuid.uuid4().hex
+    _submit_pending(
+        sid,
+        {
+            "approval_id": approval_id,
+            "command": command,
+            "pattern_key": pattern_key,
+            "pattern_keys": [pattern_key],
+            "description": title,
+            "_debug": True,
+        },
+    )
+    return j(
+        handler,
+        {
+            "ok": True,
+            "approvalId": approval_id,
+            "sessionId": sid,
+            "title": title,
+            "detail": command,
+            "requiresBiometrics": False,
+            "supported": True,
+            "endpoint": "/v1/approvals/_debug_seed",
+        },
+    )
+
+
 def handle_courier_post(handler, parsed, body) -> bool:
+    if parsed.path == "/v1/approvals/_debug_seed":
+        return _handle_courier_approval_seed(handler, body)
+
     if parsed.path.startswith("/v1/sessions/") and parsed.path.endswith("/actions"):
         parts = parsed.path.split("/")
         sid = parts[3] if len(parts) > 3 else ""
