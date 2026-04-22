@@ -70,9 +70,16 @@ def _snapshot_envelope() -> dict:
     The fields match ``shared/contract/hermes-courier-api.yaml``
     (`RealtimeEventEnvelope` component): ``type``, ``eventId``,
     ``timestamp``, ``dashboard``, ``sessions``, ``approvals``.
+
+    When the most-recently-updated session has at least one user/assistant
+    message, a ``conversation`` entry is attached so mobile clients can
+    update the active session's chat view in-band with the snapshot
+    (each conversation event carries its own ``sessionId`` so the client
+    can safely ignore updates for sessions it is not focused on).
     """
     # Local imports avoid circular dependencies at module load time.
     from api.courier_routes import (
+        _latest_conversation_event_for_session,
         _list_pending_approvals,
         _session_summary,
     )
@@ -98,7 +105,7 @@ def _snapshot_envelope() -> dict:
         ),
         "connectionState": "connected",
     }
-    return {
+    envelope = {
         "type": "snapshot",
         "kind": "snapshot",
         "eventId": uuid.uuid4().hex,
@@ -107,6 +114,12 @@ def _snapshot_envelope() -> dict:
         "sessions": sessions,
         "approvals": approvals,
     }
+    latest_session_id = sessions_raw[0].get("session_id") if sessions_raw else ""
+    if latest_session_id:
+        conversation_event = _latest_conversation_event_for_session(latest_session_id)
+        if conversation_event is not None:
+            envelope["conversation"] = conversation_event
+    return envelope
 
 
 def _envelope_fingerprint(env: dict) -> str:
@@ -120,6 +133,7 @@ def _envelope_fingerprint(env: dict) -> str:
         "dashboard": dash,
         "sessions": env.get("sessions") or [],
         "approvals": env.get("approvals") or [],
+        "conversation": env.get("conversation"),
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.md5(blob.encode("utf-8"), usedforsecurity=False).hexdigest()

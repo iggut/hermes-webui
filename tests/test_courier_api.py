@@ -18,6 +18,34 @@ from api.courier_routes import courier_runtime_status
 from tests.conftest import make_session_tracked
 
 
+def _import_seeded_session(base_url, cleanup_list, title: str, user_body: str) -> str:
+    """Create a session with pre-populated user messages via /api/session/import.
+
+    Used to exercise the session-scoped conversation contract without a
+    working agent runtime (the runtime is unavailable in the hermetic test
+    subprocess so POST /v1/conversation cannot persist real messages).
+    Returns the new session id.
+    """
+    req = urllib.request.Request(
+        base_url + "/api/session/import",
+        data=json.dumps(
+            {
+                "title": title,
+                "messages": [
+                    {"role": "user", "content": user_body, "timestamp": time.time()},
+                ],
+            }
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    sid = payload["session"]["session_id"]
+    cleanup_list.append(sid)
+    return sid
+
+
 COURIER_TOKEN = "test-courier-token"
 
 
@@ -104,14 +132,23 @@ def test_courier_approvals_and_decision(base_url, cleanup_test_sessions):
 
 
 def test_courier_conversation_and_events_reachability(base_url, cleanup_test_sessions):
-    make_session_tracked(cleanup_test_sessions)
-    code, payload = _request(base_url, "GET", "/v1/conversation", bearer=COURIER_TOKEN)
+    sid = _import_seeded_session(
+        base_url,
+        cleanup_test_sessions,
+        title="Session-scoped reachability",
+        user_body="session-scoped reachability ping",
+    )
+
+    code, payload = _request(
+        base_url, "GET", f"/v1/conversation?sessionId={sid}", bearer=COURIER_TOKEN
+    )
     assert code == 200
     assert isinstance(payload, list)
+    assert payload, "Expected at least one conversation event for the seeded session"
+    for event in payload:
+        assert event["sessionId"] == sid
+        assert {"sessionId", "eventId", "author", "body", "timestamp"} <= set(event.keys())
 
-    # Without a WebSocket upgrade, /v1/events serves a JSON snapshot with the
-    # same shape as a RealtimeEventEnvelope so plain HTTP callers get a real,
-    # useful response instead of the old 426 unsupported stub.
     code, events = _request(base_url, "GET", "/v1/events", bearer=COURIER_TOKEN)
     assert code == 200
     assert events["supported"] is True
@@ -122,6 +159,52 @@ def test_courier_conversation_and_events_reachability(base_url, cleanup_test_ses
     assert isinstance(events.get("approvals"), list)
     assert isinstance(events.get("dashboard"), dict)
     assert "activeSessionCount" in events["dashboard"]
+    conversation = events.get("conversation")
+    assert isinstance(conversation, dict), (
+        "Expected the realtime envelope to carry a conversation event for the "
+        "most-recently-updated session"
+    )
+    assert conversation["sessionId"], "Realtime conversation event must carry a sessionId"
+    assert conversation["body"]
+
+
+def test_courier_conversation_get_filters_by_session_id(base_url, cleanup_test_sessions):
+    sid_a = _import_seeded_session(
+        base_url,
+        cleanup_test_sessions,
+        title="Courier scope A",
+        user_body="message in session A",
+    )
+    sid_b = _import_seeded_session(
+        base_url,
+        cleanup_test_sessions,
+        title="Courier scope B",
+        user_body="message in session B",
+    )
+
+    code, events_a = _request(
+        base_url, "GET", f"/v1/conversation?sessionId={sid_a}", bearer=COURIER_TOKEN
+    )
+    assert code == 200
+    assert events_a and all(event["sessionId"] == sid_a for event in events_a)
+    assert any("session A" in event["body"] for event in events_a)
+    assert not any("session B" in event["body"] for event in events_a)
+
+    code, events_b = _request(
+        base_url, "GET", f"/v1/conversation?sessionId={sid_b}", bearer=COURIER_TOKEN
+    )
+    assert code == 200
+    assert events_b and all(event["sessionId"] == sid_b for event in events_b)
+    assert any("session B" in event["body"] for event in events_b)
+
+    code, events_unknown = _request(
+        base_url,
+        "GET",
+        "/v1/conversation?sessionId=does-not-exist",
+        bearer=COURIER_TOKEN,
+    )
+    assert code == 200
+    assert events_unknown == []
 
 
 def _ws_handshake(base_url: str, path: str, bearer: str):
@@ -293,6 +376,10 @@ def test_courier_conversation_post_returns_fast_unsupported_when_runtime_unavail
     assert code == 200
     assert payload["status"] in {"ok", "unsupported"}
     assert isinstance(payload["body"], str) and payload["body"].strip()
+    assert payload["sessionId"] == sid, (
+        "POST /v1/conversation response must echo the target sessionId so the "
+        "client can associate the assistant turn with the correct session"
+    )
     if payload["status"] == "unsupported":
         assert payload["supported"] is False
         assert elapsed < 6.0

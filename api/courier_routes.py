@@ -198,6 +198,7 @@ def _conversation_events_for_session(session_id: str, limit: int = 40) -> list[d
             continue
         events.append(
             {
+                "sessionId": session_id,
                 "eventId": f"{session_id}:{idx}",
                 "author": "You" if role == "user" else ("Hermes" if role == "assistant" else role),
                 "body": body,
@@ -205,6 +206,17 @@ def _conversation_events_for_session(session_id: str, limit: int = 40) -> list[d
             }
         )
     return events
+
+
+def _latest_conversation_event_for_session(session_id: str) -> dict | None:
+    """Return the most recent user/assistant event for ``session_id``.
+
+    Used by the realtime ``/v1/events`` envelope so a mobile client with a
+    chosen active session can update its conversation view without a
+    refetch. Returns ``None`` when the session is unknown or empty.
+    """
+    events = _conversation_events_for_session(session_id, limit=1)
+    return events[-1] if events else None
 
 
 def _conversation_send_payload(
@@ -216,6 +228,7 @@ def _conversation_send_payload(
     detail: str = "",
 ) -> dict:
     payload = {
+        "sessionId": session_id,
         "eventId": f"{session_id}:{int(time.time())}:{status}",
         "author": "Hermes",
         "body": body,
