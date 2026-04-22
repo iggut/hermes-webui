@@ -41,34 +41,56 @@ def _iso_timestamp(value) -> str:
 
 
 def _courier_enabled() -> bool:
-    token = os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
-    if not token:
-        return False
     flag = os.getenv("HERMES_COURIER_ENABLE", "").strip().lower()
     if flag in ("", "1", "true", "yes", "on"):
         return True
     return False
 
 
+def _courier_auth_mode() -> str:
+    mode = os.getenv("HERMES_LIVE_GATEWAY_AUTH_MODE", "token").strip().lower()
+    return "certificate" if mode == "certificate" else "token"
+
+
+def _courier_peer_cert_present(handler) -> bool:
+    connection = getattr(handler, "connection", None)
+    if connection is None:
+        return False
+    getpeercert = getattr(connection, "getpeercert", None)
+    if not callable(getpeercert):
+        return False
+    try:
+        return bool(getpeercert())
+    except Exception:
+        return False
+
+
 def courier_runtime_status() -> dict:
     token = os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
     enabled = _courier_enabled()
+    auth_mode = _courier_auth_mode()
+    client_ca = os.getenv("HERMES_WEBUI_TLS_CLIENT_CA", "").strip()
     runtime_issue = _courier_runtime_unavailable_reason()
     issues = []
-    if not token:
+    if auth_mode == "token" and not token:
         issues.append("HERMES_COURIER_BEARER_TOKEN is not set.")
+    if auth_mode == "certificate" and not client_ca:
+        issues.append("HERMES_WEBUI_TLS_CLIENT_CA is not set.")
     if not enabled:
         issues.append("HERMES_COURIER_ENABLE is disabled.")
     if runtime_issue:
         issues.append(f"Agent runtime unavailable: {runtime_issue}")
-    token_pairing_ready = bool(token and enabled)
-    pairing_mode = "token-only" if token_pairing_ready else "unavailable"
+    token_pairing_ready = bool(enabled and (token if auth_mode == "token" else client_ca))
+    pairing_mode = "certificate" if auth_mode == "certificate" else "token-only"
+    if not token_pairing_ready:
+        pairing_mode = "unavailable"
     deploy = courier_pairing_deployment_snapshot()
     return {
         "endpoint": "/v1",
         "auth": {
-            "mode": "bearer-token",
+            "mode": auth_mode,
             "bearerTokenConfigured": bool(token),
+            "clientCertificateConfigured": bool(client_ca),
             "courierEnabled": enabled,
         },
         "pairing": {
@@ -111,7 +133,8 @@ def _auth_error(handler, detail: str, status: int = 401):
 
 def validate_courier_auth(handler):
     token = os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
-    if not token:
+    auth_mode = _courier_auth_mode()
+    if auth_mode == "token" and not token:
         return _auth_error(
             handler,
             "Set HERMES_COURIER_BEARER_TOKEN to enable /v1 routes.",
@@ -123,6 +146,10 @@ def validate_courier_auth(handler):
             "Courier API disabled. Set HERMES_COURIER_ENABLE=1 to enable.",
             status=503,
         )
+    if auth_mode == "certificate":
+        if not _courier_peer_cert_present(handler):
+            return _auth_error(handler, "Missing client certificate.", status=401)
+        return None
     auth = handler.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return _auth_error(handler, "Missing bearer token.", status=401)

@@ -150,7 +150,7 @@ def main() -> None:
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
     # ── TLS/HTTPS setup (optional) ─────────────────────────────────────────
-    from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
+    from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY, TLS_CLIENT_CA
     scheme = 'https' if TLS_ENABLED else 'http'
     if TLS_ENABLED:
         try:
@@ -158,8 +158,13 @@ def main() -> None:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+            if TLS_CLIENT_CA:
+                ctx.verify_mode = ssl.CERT_REQUIRED
+                ctx.load_verify_locations(cafile=TLS_CLIENT_CA)
             httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
             print(f'  TLS enabled: cert={TLS_CERT}, key={TLS_KEY}', flush=True)
+            if TLS_CLIENT_CA:
+                print(f'  TLS client auth: ca={TLS_CLIENT_CA}', flush=True)
         except Exception as e:
             print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)
             scheme = 'http'

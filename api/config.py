@@ -34,6 +34,7 @@ PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 # ── TLS/HTTPS config (optional, env-overridable) ────────────────────────────
 TLS_CERT = os.getenv("HERMES_WEBUI_TLS_CERT", "").strip() or None
 TLS_KEY = os.getenv("HERMES_WEBUI_TLS_KEY", "").strip() or None
+TLS_CLIENT_CA = os.getenv("HERMES_WEBUI_TLS_CLIENT_CA", "").strip() or None
 TLS_ENABLED = TLS_CERT is not None and TLS_KEY is not None
 
 # ── State directory (env-overridable, never inside repo) ──────────────────────

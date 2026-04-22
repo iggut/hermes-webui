@@ -28,7 +28,15 @@ REQUIRED_FIELDS = (
     "issuedAt",
 )
 PAIRING_CONTRACT_VERSION = "2026-04-21"
-PAIRING_MODE = "token-only"
+
+
+def _courier_auth_mode() -> str:
+    mode = os.getenv("HERMES_LIVE_GATEWAY_AUTH_MODE", "token").strip().lower()
+    return "certificate" if mode == "certificate" else "token"
+
+
+def _pairing_mode() -> str:
+    return "certificate" if _courier_auth_mode() == "certificate" else "token-only"
 
 
 def _normalized_base_url(raw: str) -> str:
@@ -146,8 +154,10 @@ def courier_pairing_deployment_snapshot() -> dict:
     ext = resolved["externalBaseUrl"]
     pairing_warnings = list(resolved["urlResolutionWarnings"])
     token = os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
+    client_ca = os.getenv("HERMES_WEBUI_TLS_CLIENT_CA", "").strip()
     enabled_flag = os.getenv("HERMES_COURIER_ENABLE", "").strip().lower()
-    courier_on = bool(token) and enabled_flag in ("", "1", "true", "yes", "on")
+    auth_mode = _courier_auth_mode()
+    courier_on = bool((token if auth_mode == "token" else client_ca)) and enabled_flag in ("", "1", "true", "yes", "on")
 
     ext_msgs = _external_url_validation_messages(ext) if ext else []
     https_ok = bool(ext and urlparse(ext).scheme.lower() == "https")
@@ -156,7 +166,7 @@ def courier_pairing_deployment_snapshot() -> dict:
         courier_on and ext and https_ok and non_loopback and not ext_msgs
     )
 
-    if courier_on and token and not ext:
+    if courier_on and auth_mode == "token" and token and not ext:
         pairing_warnings.append(
             "Tailscale-ready pairing is not fully configured: set HERMES_COURIER_EXTERNAL_BASE_URL "
             "to your private https://<machine>.<tailnet>.ts.net URL (from tailscale serve)."
@@ -168,7 +178,7 @@ def courier_pairing_deployment_snapshot() -> dict:
                 pairing_warnings.append(m)
 
     mode = "unavailable"
-    if not token or not courier_on:
+    if not courier_on:
         mode = "unavailable"
     elif tailnet_profile_ready:
         mode = "tailnet"
@@ -259,7 +269,7 @@ def build_pairing_payload(enrollment_payload: dict | None = None, include_bearer
     gateway_url = resolved["gatewayUrl"]
 
     bearer_token = os.getenv("HERMES_COURIER_BEARER_TOKEN", "").strip()
-    token_included = bool(include_bearer and bearer_token)
+    token_included = bool(include_bearer and bearer_token and _courier_auth_mode() == "token")
     bearer_available = bool(bearer_token)
     now_iso = datetime.now(tz=timezone.utc).isoformat()
 
@@ -269,8 +279,8 @@ def build_pairing_payload(enrollment_payload: dict | None = None, include_bearer
         "publicKeyFingerprint": (enrollment or {}).get("publicKeyFingerprint", ""),
         "appVersion": (enrollment or {}).get("appVersion", ""),
         "issuedAt": now_iso,
-        "courierMode": "bearer-token",
-        "pairingMode": PAIRING_MODE,
+        "courierMode": "certificate" if _courier_auth_mode() == "certificate" else "bearer-token",
+        "pairingMode": _pairing_mode(),
         "pairingContractVersion": PAIRING_CONTRACT_VERSION,
         "apiBasePath": "/v1",
     }
@@ -284,7 +294,7 @@ def build_pairing_payload(enrollment_payload: dict | None = None, include_bearer
         "pairingPayload": query,
         "tokenIncluded": token_included,
         "pairingQrDataUrl": _build_pairing_qr_data_url(pairing_uri),
-        "pairingMode": PAIRING_MODE,
+        "pairingMode": _pairing_mode(),
         "pairingContractVersion": PAIRING_CONTRACT_VERSION,
         "postScanBootstrapSupported": False,
         "gatewayUrlSource": resolved["gatewayUrlSource"],

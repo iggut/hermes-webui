@@ -11,6 +11,7 @@ __pycache__/
 
 # Archive directory (pre-git backups, kept on disk but not tracked)
 archive/
+.tls/
 
 # Local environment and secrets (but keep the example template)
 .env

@@ -14,7 +14,7 @@ from api.courier_pairing import (
     courier_pairing_deployment_snapshot,
     resolve_courier_gateway_for_pairing,
 )
-from api.courier_routes import courier_runtime_status, _conversation_send_error_payload
+from api.courier_routes import courier_runtime_status, _conversation_send_error_payload, validate_courier_auth
 from tests.conftest import make_session_tracked
 
 
@@ -500,24 +500,37 @@ def test_courier_pairing_generate_returns_compatible_uri(base_url):
 
 
 
-def test_courier_pairing_status_reports_token_backed_availability(base_url):
-    code, data = _request(base_url, "GET", "/api/courier/pairing/status")
-    assert code == 200
-    assert data["bearerTokenConfigured"] is True
-    assert data["tokenBackedPairingAvailable"] is True
-    assert data["pairingMode"] == "token-only"
-    assert data["qrPairingAvailable"] is True
-    assert data["postScanBootstrapAvailable"] is False
-    assert data["courierEnabled"] is True
-    assert data["defaultPairingGatewayUrl"] == "http://127.0.0.1:8787"
-    assert data["gatewayUrlSource"] == "default_local"
-    assert data["externalBaseUrlConfigured"] is False
-    assert data["externalBaseUrl"] == ""
-    assert data["tailscaleProfileReady"] is False
-    assert data["pairingUrlMode"] == "local"
-    assert isinstance(data["pairingWarnings"], list)
-    assert isinstance(data["issues"], list)
-    assert isinstance(data["unavailableReasons"], list)
+def test_courier_pairing_status_reports_certificate_mode(monkeypatch):
+    monkeypatch.delenv("HERMES_COURIER_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("HERMES_COURIER_ENABLE", "1")
+    monkeypatch.setenv("HERMES_LIVE_GATEWAY_AUTH_MODE", "certificate")
+    monkeypatch.setenv("HERMES_WEBUI_TLS_CLIENT_CA", "/tmp/hermes-client-ca.pem")
+    status = courier_runtime_status()
+    pairing = status["pairing"]
+
+    assert status["auth"]["mode"] == "certificate"
+    assert status["auth"]["clientCertificateConfigured"] is True
+    assert status["auth"]["courierEnabled"] is True
+    assert pairing["tokenBackedPairingAvailable"] is True
+    assert pairing["pairingMode"] == "certificate"
+    assert pairing["qrPairingAvailable"] is True
+
+
+def test_validate_courier_auth_accepts_client_certificate(monkeypatch):
+    monkeypatch.setenv("HERMES_COURIER_ENABLE", "1")
+    monkeypatch.setenv("HERMES_LIVE_GATEWAY_AUTH_MODE", "certificate")
+    monkeypatch.setenv("HERMES_WEBUI_TLS_CLIENT_CA", "/tmp/hermes-client-ca.pem")
+    monkeypatch.delenv("HERMES_COURIER_BEARER_TOKEN", raising=False)
+
+    class _Conn:
+        def getpeercert(self):
+            return {"subject": (("commonName", "hermes-courier"),)}
+
+    class _Handler:
+        headers = {}
+        connection = _Conn()
+
+    assert validate_courier_auth(_Handler()) is None
 
 
 def test_courier_pairing_generate_status_matches_payload(base_url):
@@ -533,7 +546,7 @@ def test_courier_v1_status_reports_runtime_state(base_url):
     code, payload = _request(base_url, "GET", "/v1/status", bearer=COURIER_TOKEN)
     assert code == 200
     assert payload["endpoint"] == "/v1"
-    assert payload["auth"]["mode"] == "bearer-token"
+    assert payload["auth"]["mode"] == "token"
     assert payload["auth"]["bearerTokenConfigured"] is True
     assert payload["auth"]["courierEnabled"] is True
     assert payload["pairing"]["tokenBackedPairingAvailable"] is True
