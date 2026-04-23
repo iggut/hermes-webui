@@ -10,19 +10,75 @@ const ICONS={
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
 };
 
+const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+let _sessionViewedCounts = null;
+
+function _getSessionViewedCounts() {
+  if (_sessionViewedCounts !== null) return _sessionViewedCounts;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_VIEWED_COUNTS_KEY) || '{}');
+    _sessionViewedCounts = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionViewedCounts = {};
+  }
+  return _sessionViewedCounts;
+}
+
+function _saveSessionViewedCounts() {
+  try {
+    localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(_getSessionViewedCounts()));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function _setSessionViewedCount(sid, messageCount = 0) {
+  if (!sid) return;
+  const counts = _getSessionViewedCounts();
+  const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  counts[sid] = next;
+  _saveSessionViewedCounts();
+}
+
+function _hasUnreadForSession(s) {
+  if (!s || !s.session_id) return false;
+  const counts = _getSessionViewedCounts();
+  if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
+    _setSessionViewedCount(s.session_id, Number(s.message_count || 0));
+    return false;
+  }
+  if (!Number.isFinite(s.message_count)) return false;
+  return s.message_count > Number(counts[s.session_id] || 0);
+}
+
 async function newSession(flash){
   updateQueueBadge();
   S.toolCalls=[];
   clearLiveToolCards();
-  // Use profile default workspace for new sessions after a profile switch (one-shot),
-  // otherwise inherit from the current session (or let server pick the default)
-  const inheritWs=S._profileDefaultWorkspace||(S.session?S.session.workspace:null);
-  S._profileDefaultWorkspace=null; // consume — only applies to the first new session after switch
-  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
+  // One-shot profile-switch workspace: applied to the first new session after a profile
+  // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
+  // persistent boot/settings default) is not consumed and remains available for the
+  // blank-page display on all subsequent returns to the empty state (#823).
+  const switchWs=S._profileSwitchWorkspace;
+  S._profileSwitchWorkspace=null;
+  const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
+  // Use the saved default model for new sessions (#872). The user's saved
+  // default_model (from Settings) takes priority over the chat-header dropdown
+  // value, which reflects the *previous* session's model. Fall back to the
+  // dropdown value only when no default_model is configured.
+  const newModel=window._defaultModel||$('modelSelect').value;
+  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:newModel,workspace:inheritWs,profile:S.activeProfile||'default'})});
   S.session=data.session;S.messages=data.session.messages||[];
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;
   localStorage.setItem('hermes-webui-session',S.session.session_id);
+  _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
+  // Sync chat-header dropdown to the session's model so the UI reflects
+  // the default model the server actually used (#872).
+  if(S.session.model && S.session.model!==$('modelSelect').value && typeof _applyModelToDropdown==='function'){
+    _applyModelToDropdown(S.session.model,$('modelSelect'));
+    if(typeof syncModelChip==='function') syncModelChip();
+  }
   // Reset per-session visual state: a fresh chat is idle even if another
   // conversation is still streaming in the background.
   S.busy=false;
@@ -43,6 +99,7 @@ async function loadSession(sid){
   const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
   S.session=data.session;
   S.lastUsage={...(data.session.last_usage||{})};
+  _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   localStorage.setItem('hermes-webui-session',S.session.session_id);
   data.session.messages = (data.session.messages || []).filter(m => m && m.role);
   const hasMessageToolMetadata = (data.session.messages || []).some(m => {
@@ -352,12 +409,90 @@ async function renderSessionList(){
     ]);
     _allSessions = sessData.sessions||[];
     _allProjects = projData.projects||[];
+    const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
+    if (isStreaming) {
+      startStreamingPoll();
+    } else {
+      stopStreamingPoll();
+    }
+    ensureSessionTimeRefreshPoll();
     renderSessionListFromCache();  // no-ops if rename is in progress
   }catch(e){console.warn('renderSessionList',e);}
 }
 
 // ── Gateway session SSE (real-time sync for agent sessions) ──
 let _gatewaySSE = null;
+let _gatewayPollTimer = null;
+let _gatewayProbeInFlight = false;
+let _gatewaySSEWarningShown = false;
+const _gatewayFallbackPollMs = 30000;
+const _streamingPollMs = 5000;
+const _sessionTimeRefreshMs = 60000;
+let _streamingPollTimer = null;
+let _sessionTimeRefreshTimer = null;
+
+function startStreamingPoll(){
+  if(_streamingPollTimer) return;
+  _streamingPollTimer = setInterval(() => {
+    void renderSessionList();
+  }, _streamingPollMs);
+}
+
+function stopStreamingPoll(){
+  if(!_streamingPollTimer) return;
+  clearInterval(_streamingPollTimer);
+  _streamingPollTimer = null;
+}
+
+function ensureSessionTimeRefreshPoll(){
+  if(_sessionTimeRefreshTimer) return;
+  _sessionTimeRefreshTimer = setInterval(() => {
+    renderSessionListFromCache();
+  }, _sessionTimeRefreshMs);
+}
+
+function startGatewayPollFallback(ms){
+  const intervalMs = Math.max(5000, Number(ms) || _gatewayFallbackPollMs);
+  if(_gatewayPollTimer) clearInterval(_gatewayPollTimer);
+  _gatewayPollTimer = setInterval(() => { renderSessionList(); }, intervalMs);
+}
+
+function stopGatewayPollFallback(){
+  if(_gatewayPollTimer){
+    clearInterval(_gatewayPollTimer);
+    _gatewayPollTimer = null;
+  }
+}
+
+async function probeGatewaySSEStatus(){
+  if(_gatewayProbeInFlight || !window._showCliSessions) return;
+  _gatewayProbeInFlight = true;
+  try{
+    const resp = await fetch('/api/sessions/gateway/stream?probe=1', { credentials:'same-origin' });
+    const data = await resp.json().catch(() => ({}));
+    if(resp.ok && data.watcher_running){
+      stopGatewayPollFallback();
+      _gatewaySSEWarningShown = false;
+      return;
+    }
+    if(resp.status === 503 || data.watcher_running === false){
+      startGatewayPollFallback(data.fallback_poll_ms || _gatewayFallbackPollMs);
+      renderSessionList();
+      if(!_gatewaySSEWarningShown && typeof showToast === 'function'){
+        showToast('Gateway sync unavailable — falling back to periodic refresh.', 5000);
+        _gatewaySSEWarningShown = true;
+      }
+    }
+  }catch(e){
+    // Network error during probe — server may be unreachable.
+    // Start fallback polling as a safe default; it will self-cancel
+    // when the SSE connection recovers and sessions_changed fires.
+    startGatewayPollFallback(_gatewayFallbackPollMs);
+    renderSessionList();
+  }finally{
+    _gatewayProbeInFlight = false;
+  }
+}
 
 function startGatewaySSE(){
   stopGatewaySSE();
@@ -368,6 +503,8 @@ function startGatewaySSE(){
       try{
         const data = JSON.parse(ev.data);
         if(data.sessions){
+          stopGatewayPollFallback();
+          _gatewaySSEWarningShown = false;
           renderSessionList(); // re-fetch and re-render
           // If the active session received new gateway messages, refresh the conversation view.
           // S.busy check prevents stomping on an in-progress WebUI response.
@@ -397,9 +534,11 @@ function startGatewaySSE(){
       }catch(e){ /* ignore parse errors */ }
     });
     _gatewaySSE.onerror = () => {
-      // EventSource auto-reconnects; no action needed
+      void probeGatewaySSEStatus();
     };
-  }catch(e){ /* SSE not available */ }
+  }catch(e){
+    void probeGatewaySSEStatus();
+  }
 }
 
 function stopGatewaySSE(){
@@ -407,6 +546,9 @@ function stopGatewaySSE(){
     _gatewaySSE.close();
     _gatewaySSE = null;
   }
+  stopGatewayPollFallback();
+  _gatewayProbeInFlight = false;
+  _gatewaySSEWarningShown = false;
 }
 
 let _searchDebounceTimer = null;
@@ -636,7 +778,9 @@ function renderSessionListFromCache(){
   function _renderOneSession(s){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'');
+    const isStreaming=Boolean(s.is_streaming);
+    const hasUnread=_hasUnreadForSession(s)&&!isActive;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
@@ -649,12 +793,25 @@ function renderSessionListFromCache(){
     sessionText.className='session-text';
     const titleRow=document.createElement('div');
     titleRow.className='session-title-row';
+    if(s.pinned){
+      const pinInd=document.createElement('span');
+      pinInd.className='session-pin-indicator';
+      pinInd.innerHTML=ICONS.pin;
+      titleRow.appendChild(pinInd);
+    }
+    const state=document.createElement('span');
+    state.className='session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
+    titleRow.appendChild(state); // always reserve slot — prevents title shift when indicator appears
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
     title.title='Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
+    const ts=document.createElement('span');
+    ts.className='session-time';
+    ts.textContent=_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
+    titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
     const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
     if(density==='detailed'){
@@ -724,13 +881,6 @@ function renderSessionListFromCache(){
       setTimeout(()=>{inp.focus();inp.select();},10);
     };
 
-    // Pin indicator (inline, only when pinned — no space reserved otherwise)
-    if(s.pinned){
-      const pinInd=document.createElement('span');
-      pinInd.className='session-pin-indicator';
-      pinInd.innerHTML=ICONS.pin;
-      el.appendChild(pinInd);
-    }
     // Project indicator: colored dot appended after the title
     if(s.project_id){
       const proj=_allProjects.find(p=>p.project_id===s.project_id);

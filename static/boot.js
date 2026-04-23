@@ -721,6 +721,31 @@ function _syncSkinPicker(active){
   });
 }
 
+function _applyFontSize(size){
+  if(size&&size!=='default'){
+    document.documentElement.dataset.fontSize=size;
+  } else {
+    delete document.documentElement.dataset.fontSize;
+  }
+}
+
+function _pickFontSize(size){
+  localStorage.setItem('hermes-font-size',size);
+  _applyFontSize(size);
+  _syncFontSizePicker(size);
+  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
+  const hidden=$('settingsFontSize');
+  if(hidden) hidden.value=size;
+}
+
+function _syncFontSizePicker(active){
+  document.querySelectorAll('#fontSizePickerGrid .font-size-pick-btn').forEach(btn=>{
+    const sel=btn.dataset.fontSizeVal===(active||'default');
+    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
+    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+  });
+}
+
 function _buildSkinPicker(activeSkin){
   const grid=$('skinPickerGrid');
   if(!grid) return;
@@ -764,8 +789,12 @@ function applyBotName(){
     window._showCliSessions=!!s.show_cli_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
+    window._showThinking=s.show_thinking!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._botName=s.bot_name||'Hermes';
+    // Persist default workspace so the blank new-chat page can show it
+    // and workspace actions (New file/folder) work before the first session (#804).
+    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
     _applyTheme(appearance.theme);
@@ -785,6 +814,7 @@ function applyBotName(){
     window._showCliSessions=false;
     window._soundEnabled=false;
     window._notificationsEnabled=false;
+    window._showThinking=true;
     window._sidebarDensity='compact';
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
@@ -817,6 +847,7 @@ function applyBotName(){
     $('modelSelect').value=savedModel;
     // If the value didn't take (model not in list), clear the bad pref
     if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
+    else if(typeof syncModelChip==='function') syncModelChip();
   }
   // Pre-load workspace list so sidebar name is correct from first render
   await loadWorkspaceList();
@@ -824,6 +855,11 @@ function applyBotName(){
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
+  // Fix #822: clear any browser-restored value before first render. This
+  // covers fresh page loads and reloads. The bfcache restore case is handled
+  // separately below by a `pageshow` listener — the async IIFE here does NOT
+  // re-run when the browser restores the page from bfcache.
+  const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
     try{
@@ -846,3 +882,18 @@ function applyBotName(){
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })();
+
+// Fix #822 (bfcache path): when the browser restores the page from the
+// back-forward cache, the async boot IIFE above does NOT re-run, but the
+// DOM — including any stale value in #sessionSearch — IS restored.  A
+// prior search string would silently hide all sessions via the filter in
+// renderSessionListFromCache().  Clear the field and re-render whenever
+// the page is restored from cache (`event.persisted === true`).
+window.addEventListener('pageshow', (event) => {
+  if (!event.persisted) return;  // fresh loads are handled by the IIFE above
+  const _srch = document.getElementById('sessionSearch');
+  if (_srch) _srch.value = '';
+  if (typeof renderSessionListFromCache === 'function') {
+    try { renderSessionListFromCache(); } catch (_) {}
+  }
+});

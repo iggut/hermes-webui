@@ -1,3 +1,9 @@
+function _markSessionViewed(sid, messageCount) {
+  if(typeof _setSessionViewedCount!=='function' || !sid) return;
+  const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  _setSessionViewedCount(sid, next);
+}
+
 async function send(){
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
@@ -16,9 +22,34 @@ async function send(){
     }
     return;
   }
-  // Slash command intercept -- local commands handled without agent round-trip
-  if(text.startsWith('/')&&!S.pendingFiles.length&&executeCommand(text)){
-    $('msg').value='';autoResize();hideCmdDropdown();return;
+  // Slash command intercept -- local commands handled without agent round-trip.
+  // We push the user message BEFORE running the handler for echo-worthy
+  // commands so chat order is correct: some handlers (e.g. cmdHelp) push
+  // their assistant response synchronously.  If we pushed AFTER, S.messages
+  // would be [assistant, user] and the chat would show the response above
+  // the user's own input — reverse chronological order (#840 ordering bug).
+  if(text.startsWith('/')&&!S.pendingFiles.length){
+    const _parsedCmd=parseCommand(text);
+    const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
+    if(_cmd){
+      let _pushedUser=false;
+      if(!_cmd.noEcho){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        _pushedUser=true;
+        renderMessages();
+      }
+      // Run the handler directly (we already looked it up).  If it returns
+      // false it's opting out — e.g. /reasoning <level> falls through so the
+      // agent sees the raw text.  Roll back the echo push in that case so
+      // the normal send path doesn't duplicate it.
+      if(_cmd.fn(_parsedCmd.args)===false){
+        if(_pushedUser){S.messages.pop();renderMessages();}
+        // Fall through to normal send path
+      } else {
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
+    }
   }
   if(!S.session){await newSession();await renderSessionList();}
 
@@ -79,9 +110,17 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    if(S.session&&S.session.session_id===activeSid){
+      S.session.active_stream_id = streamId;
+    }
     markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
       saveInflightState(activeSid,{streamId,messages:INFLIGHT[activeSid].messages,uploaded,toolCalls:INFLIGHT[activeSid].toolCalls||[]});
+    }
+    // Refresh session list so background streaming indicators appear immediately for the
+    // session that was just started and any others that may already be running.
+    if(typeof renderSessionList === 'function') {
+      void renderSessionList();
     }
     // Show Cancel button
     const cancelBtn=$('btnCancel');
@@ -231,6 +270,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
 
+  // Bug A fix (#631): track whether the stream has been finalized so any rAF
+  // scheduled by a trailing 'token'/'reasoning' event that arrives in the same
+  // microtask batch as 'done' does not fire after renderMessages() has already
+  // settled the DOM — which was causing the thinking card to reappear below
+  // the final answer or the response to render twice.
+  let _streamFinalized=false;
+  let _pendingRafHandle=null;
+
   // rAF-throttled rendering: buffer tokens, render at most once per frame
   let _renderPending=false;
   // Extract display text from assistantText, stripping completed thinking blocks
@@ -246,7 +293,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _streamDisplay(){
     const raw=_stripXmlToolCalls(assistantText);
-    if(reasoningText) return raw;
+    // Always run think-block stripping even when reasoningText is populated.
+    // Some providers emit reasoning content via on_reasoning AND wrap it in
+    // <think> tags in the token stream — the early-return caused the thinking
+    // card and main response to show identical content (closes #852).
     for(const {open,close} of _thinkPairs){
       // Trim leading whitespace before checking for the open tag — some models
       // (e.g. MiniMax) emit newlines before <think>.
@@ -295,6 +345,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return {thinkingText:'', displayText:raw, inThinking:false};
   }
   function _renderLiveThinking(parsed){
+    if(window._showThinking===false){removeThinking();return;}
     const text=(parsed&&parsed.thinkingText)||'';
     if(text||(parsed&&parsed.inThinking)){
       if(typeof updateThinking==='function') updateThinking(text||'Thinking…');
@@ -305,8 +356,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _scheduleRender(){
     if(_renderPending) return;
+    if(_streamFinalized) return; // Bug A: don't schedule new rAF after stream finalized
     _renderPending=true;
-    requestAnimationFrame(()=>{
+    _pendingRafHandle=requestAnimationFrame(()=>{
+      _pendingRafHandle=null;
       _renderPending=false;
       const parsed=_parseStreamState();
       _renderLiveThinking(parsed);
@@ -318,6 +371,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
+    // Note on #631 Bug B: the original PR description stated the server
+    // "replays buffered token events" on reconnect, and proposed resetting
+    // the accumulators here so the re-sent tokens wouldn't double the prefix.
+    // That is NOT how the server actually works — api/routes._handle_sse_stream
+    // reads a one-shot queue.Queue() that delivers each event to exactly one
+    // consumer; a reconnect picks up from the current queue position and gets
+    // only events produced during the outage.  Resetting the accumulators here
+    // would wipe the already-displayed content and restart the response from
+    // the first post-reconnect token — a real data-loss regression.
+    //
+    // The "doubled response" / "stuck cursor" symptom is fully explained by
+    // Bug A (trailing rAF after `done` inserting a new live-turn wrapper) —
+    // the fixes below (_streamFinalized guard + cancelAnimationFrame in the
+    // terminal handlers) address it without needing a reset here.
+
     source.addEventListener('token',e=>{
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
@@ -445,6 +513,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       _terminalStateReached=true;
+      // Bug A fix: cancel any pending rAF and mark stream finalized before
+      // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
+      // can reintroduce a stale thinking card or duplicate content.
+      _streamFinalized=true;
+      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       const d=JSON.parse(e.data);
       delete INFLIGHT[activeSid];
       clearInflight();clearInflightState(activeSid);
@@ -478,6 +552,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.busy=false;
         // No-reply guard (#373): if agent returned nothing, show inline error
         if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+        _markSessionViewed(activeSid, d.session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
       }
       renderSessionList();setBusy(false);setStatus('');
@@ -508,6 +583,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('apperror',e=>{
       _terminalStateReached=true;
+      _streamFinalized=true;
+      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
       source.close();
@@ -529,6 +607,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
+        _markSessionViewed(activeSid, S.messages.length);
         renderMessages();
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
@@ -536,6 +615,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
       }
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
+      renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
     source.addEventListener('warning',e=>{
@@ -552,7 +632,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('error',async e=>{
       source.close();
-      if(_terminalStateReached){
+      if(_terminalStateReached || _streamFinalized){
         _closeSource();
         return;
       }
@@ -580,6 +660,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('cancel',e=>{
       _terminalStateReached=true;
+      _streamFinalized=true;
+      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
       delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
@@ -587,10 +670,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
       }
-      if(S.session&&S.session.session_id===activeSid){
-        clearLiveToolCards();if(!assistantText)removeThinking();
-        S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
-      }
+      // Fetch latest session from server to get accurate message list (includes cancel status)
+      // This ensures messages stay in sync with server, fixing race condition where local
+      // "*Task cancelled.*" message gets lost when done event overwrites S.messages
+      (async()=>{
+        try{
+          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          if(data&&data.session&&S.session&&S.session.session_id===activeSid){
+            S.session=data.session;
+            S.messages=(data.session.messages||[]).filter(m=>m&&m.role);
+            clearLiveToolCards();if(!assistantText)removeThinking();
+            _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
+            renderMessages();
+          }
+        }catch(_){
+          // Fallback to local cancel message if API fails
+          if(S.session&&S.session.session_id===activeSid){
+            clearLiveToolCards();if(!assistantText)removeThinking();
+            S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
+            _markSessionViewed(activeSid, S.messages.length);
+          }
+        }
+      })();
       renderSessionList();
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
     });
@@ -621,6 +722,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }else{
           S.toolCalls=[];
         }
+        _markSessionViewed(activeSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();
       }
       renderSessionList();setBusy(false);setComposerStatus('');
@@ -631,6 +733,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(){
+    // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
+    // cannot fire after renderMessages() has settled the DOM with the error message.
+    _streamFinalized=true;
+    if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+    if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
     _closeSource();
     if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
@@ -639,6 +746,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
       clearLiveToolCards();if(!assistantText)removeThinking();
       S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages();
+      _markSessionViewed(activeSid, S.messages.length);
     }else{
       if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;

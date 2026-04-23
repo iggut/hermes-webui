@@ -3,29 +3,31 @@
 // (no round-trip to the agent) and shows feedback via toast or local message.
 
 const COMMANDS=[
+  // noEcho:true = action-only commands that don't produce a chat response.
+  // Commands without noEcho get a user message echoed to the chat (#840).
   {name:'help',      desc:t('cmd_help'),             fn:cmdHelp},
-  {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear},
-  {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]'},
-  {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact},
-  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models'},
-  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name'},
-  {name:'new',       desc:t('cmd_new'),            fn:cmdNew},
-  {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage},
-  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name'},
+  {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear,     noEcho:true},
+  {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]', noEcho:true},
+  {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact, noEcho:true},
+  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models', noEcho:true},
+  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name',           noEcho:true},
+  {name:'new',       desc:t('cmd_new'),            fn:cmdNew,       noEcho:true},
+  {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
+  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
-  {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop},
+  {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
-  {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry},
-  {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo},
+  {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry,     noEcho:true},
+  {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
-  {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice},
+  {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
 ];
 
 const SLASH_SUBARG_SOURCES={
   model:{desc:t('cmd_model'), subArgs:'models'},
   personality:{desc:t('cmd_personality'), subArgs:'personalities'},
-  reasoning:{desc:'Set reasoning effort', subArgs:['low','medium','high']},
 };
 
 function parseCommand(text){
@@ -38,11 +40,15 @@ function parseCommand(text){
 
 function executeCommand(text){
   const parsed=parseCommand(text);
-  if(!parsed)return false;
+  if(!parsed)return null;
   const cmd=COMMANDS.find(c=>c.name===parsed.name);
-  if(!cmd)return false;
-  cmd.fn(parsed.args);
-  return true;
+  if(!cmd)return null;
+  // A handler may return `false` to opt out of interception — e.g. /reasoning
+  // with an effort level falls through so the agent's own handler sees it,
+  // preserving the pre-existing pass-through behaviour for that subcommand.
+  if(cmd.fn(parsed.args)===false)return null;
+  // Return noEcho flag so send() knows whether to echo the command as a user message (#840).
+  return {noEcho:!!cmd.noEcho};
 }
 
 function getMatchingCommands(prefix){
@@ -511,6 +517,8 @@ async function cmdPersonality(args){
   }
   try{
     const res=await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name})});
+    S.messages.push({role:'assistant',content:t('personality_set')+`**${name}**`});
+    renderMessages();
     showToast(t('personality_set')+name);
   }catch(e){showToast(t('failed_colon')+e.message);}
 }
@@ -535,6 +543,8 @@ async function cmdTitle(args){
     if(typeof syncTopbar==='function')syncTopbar();
     if(typeof renderSessionList==='function')renderSessionList();
     showToast(`${t('title_set')} "${S.session.title}"`);
+    S.messages.push({role:'assistant',content:`${t('title_set')} **${S.session.title}**`});
+    renderMessages();
   }catch(e){showToast(t('failed_colon')+e.message);}
 }
 async function cmdRetry(){
@@ -571,6 +581,56 @@ async function cmdStatus(){
     S.messages.push({role:'assistant',content:[`**${t('status_heading')}**`,'',`**${t('status_session_id')}:** \`${r.session_id}\``,`**${t('status_title')}:** ${r.title||t('untitled')}`,`**${t('status_model')}:** ${r.model||t('usage_default_model')}`,`**${t('status_workspace')}:** ${r.workspace}`,`**${t('status_personality')}:** ${r.personality||t('usage_personality_none')}`,`**${t('status_messages')}:** ${r.message_count}`,`**${t('status_agent_running')}:** ${r.agent_running?t('status_yes'):t('status_no')}`,].join('\n')});
     renderMessages();
   }catch(e){showToast(t('status_load_failed')+e.message);}
+}
+function cmdReasoning(args){
+  const arg=(args||'').trim().toLowerCase();
+  const BRAIN='\uD83E\uDDE0';
+  // Matches hermes_constants.VALID_REASONING_EFFORTS + 'none' (CLI parity).
+  const EFFORTS=['none','minimal','low','medium','high','xhigh'];
+  // Shared status renderer used by the no-args branch and as a fallback.
+  function _fmtStatus(st){
+    const vis=(st && st.show_reasoning===false)?'off':'on';
+    const eff=(st && st.reasoning_effort)||'default';
+    return BRAIN+' Reasoning effort: '+eff+' \u00B7 display: '+vis
+      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh';
+  }
+  if(!arg){
+    // Status — read from the same config.yaml keys the CLI uses.
+    api('/api/reasoning').then(function(st){showToast(_fmtStatus(st));})
+      .catch(function(){showToast(BRAIN+' /reasoning — status unavailable');});
+    return true;
+  }
+  if(arg==='show'||arg==='on'||arg==='hide'||arg==='off'){
+    const on=(arg==='show'||arg==='on');
+    // Update the UI render gate immediately for responsiveness.
+    window._showThinking=on;
+    if(typeof renderMessages==='function') renderMessages();
+    // Persist via /api/reasoning → config.yaml display.show_reasoning
+    // (CLI reads the same key).  Also mirror into WebUI settings.json
+    // show_thinking so boot.js picks it up on reload without hitting
+    // /api/reasoning on every page load.
+    api('/api/reasoning',{method:'POST',body:JSON.stringify({display:arg})}).catch(function(){});
+    api('/api/settings',{method:'POST',body:JSON.stringify({show_thinking:on})}).catch(function(){});
+    showToast(BRAIN+' Thinking blocks: '+(on?'on':'off')+' (saved)');
+    return true;
+  }
+  if(EFFORTS.includes(arg)){
+    // Persist via /api/reasoning → config.yaml agent.reasoning_effort.
+    // Takes effect on the NEXT session/turn (agent re-reads config at
+    // construction time), matching CLI semantics where `/reasoning high`
+    // also forces an agent re-init.
+    api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
+      .then(function(st){
+        const eff=(st && st.reasoning_effort)||arg;
+        showToast(BRAIN+' Reasoning effort set to '+eff+' (saved; applies to next turn)');
+      })
+      .catch(function(e){
+        showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));
+      });
+    return true;
+  }
+  showToast('Unknown argument: '+arg+' \u2014 use show|hide|'+EFFORTS.join('|'));
+  return true;
 }
 function cmdVoice(){
   const mic=document.getElementById('btnMic');
@@ -681,6 +741,9 @@ function navigateCmdDropdown(dir){
   if(_cmdSelectedIdx<0)_cmdSelectedIdx=items.length-1;
   if(_cmdSelectedIdx>=items.length)_cmdSelectedIdx=0;
   items[_cmdSelectedIdx].classList.add('selected');
+  // Scroll the newly highlighted item into view so it stays visible when the
+  // dropdown overflows and the user navigates with keyboard (#838).
+  items[_cmdSelectedIdx].scrollIntoView({block:'nearest'});
 }
 
 function selectCmdDropdownItem(){

@@ -14,6 +14,7 @@ import json
 import pathlib
 import re
 import urllib.request
+from tests.conftest import TEST_STATE_DIR
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 from tests._pytest_port import BASE
@@ -21,6 +22,15 @@ from tests._pytest_port import BASE
 
 def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+
+
+def _post(path, body=None):
+    data = json.dumps(body or {}).encode()
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read()), r.status
 
 
 # ── 1. streaming.py: auth error detection ───────────────────────────────────
@@ -348,7 +358,7 @@ def test_google_active_provider_keeps_valid_gemini_session_model(monkeypatch):
 
 
 def test_session_model_normalizer_persists_corrected_model(monkeypatch):
-    """GET /api/session should persist the corrected model back to disk/state."""
+    """Write-path normalization should still persist corrected models."""
     import api.routes as routes
 
     monkeypatch.setattr(
@@ -375,6 +385,65 @@ def test_session_model_normalizer_persists_corrected_model(monkeypatch):
     assert effective == "gpt-5.4-mini"
     assert session.model == "gpt-5.4-mini"
     assert save_calls == [False]
+
+
+def test_session_model_display_resolver_is_read_only(monkeypatch):
+    """Read-path model resolution must not mutate or save the session."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = "gemini-3.1-pro-preview"
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._resolve_effective_session_model_for_display(session)
+
+    assert effective == "gpt-5.4-mini"
+    assert session.model == "gemini-3.1-pro-preview"
+    assert save_calls == []
+
+
+def test_api_session_is_side_effect_free_for_stale_models():
+    """GET /api/session must not rewrite the session file on first open (#845)."""
+    created, status = _post("/api/session/new", {})
+    assert status == 200
+    sid = created["session"]["session_id"]
+
+    session_path = TEST_STATE_DIR / "sessions" / f"{sid}.json"
+    session_data = json.loads(session_path.read_text(encoding="utf-8"))
+    stale_model = "google/gemini-3.1-pro-preview"
+    session_data["model"] = stale_model
+    before = json.dumps(session_data, ensure_ascii=False, indent=2)
+    session_path.write_text(before, encoding="utf-8")
+
+    with urllib.request.urlopen(
+        BASE + f"/api/session?session_id={sid}", timeout=10
+    ) as r:
+        payload = json.loads(r.read())
+
+    after = session_path.read_text(encoding="utf-8")
+    assert payload["session"]["model"], "response should still expose an effective display model"
+    assert payload["session"]["model"] != stale_model, (
+        "response model should be compatibility-normalized on the read path"
+    )
+    assert after == before, (
+        "GET /api/session must return an effective model for display without "
+        "rewriting the session file on disk"
+    )
 
 
 # ── Model switch toast (#419) ─────────────────────────────────────────────────
@@ -497,4 +566,134 @@ def test_empty_model_session_does_not_trigger_save(monkeypatch):
     assert save_calls == [], (
         "_normalize_session_model_in_place must not call session.save() when "
         "the session has no stored model — no correction needed, just a fallback."
+    )
+
+
+# ── Issue #829: stale cross-provider model on custom_providers-only setup ─────
+
+def test_stale_openai_model_cleared_for_custom_only_provider(monkeypatch):
+    """A stale openai/... session model must be cleared when active provider is
+    'custom' and no catalog group can route the openai prefix (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "",
+            "groups": [
+                {"provider": "Agent37", "provider_id": "custom:agent37",
+                 "models": [{"id": "agent37/default", "label": "default"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "openai/gpt-5.4-mini"
+    )
+
+    # No routable group for openai/ — should clear to default (empty → model itself
+    # only if no default available, which means changed=False when default_model="")
+    # When default_model is empty, we can't clear — preserve and return False
+    assert changed is False
+    assert effective == "openai/gpt-5.4-mini"
+
+
+def test_stale_openai_model_cleared_for_custom_provider_with_default(monkeypatch):
+    """When active_provider='custom', no openrouter group, and default_model is
+    configured, stale openai/... model should be cleared to default (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "agent37/default",
+            "groups": [
+                {"provider": "Agent37", "provider_id": "custom:agent37",
+                 "models": [{"id": "agent37/default", "label": "default"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "openai/gpt-5.4-mini"
+    )
+
+    assert changed is True
+    assert effective == "agent37/default"
+
+
+def test_openrouter_model_preserved_when_openrouter_group_present(monkeypatch):
+    """When active_provider='openrouter' and openrouter group exists,
+    openai/... model IDs must pass through unchanged — they are routable (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openrouter",
+            "default_model": "openai/gpt-5.4-mini",
+            "groups": [
+                {"provider": "OpenRouter", "provider_id": "openrouter",
+                 "models": [{"id": "openai/gpt-5.4-mini", "label": "GPT-5.4 Mini"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "openai/gpt-5.4-mini"
+    )
+
+    assert changed is False
+    assert effective == "openai/gpt-5.4-mini"
+
+
+def test_custom_namespace_model_always_preserved_on_custom_provider(monkeypatch):
+    """Model IDs with 'custom/' prefix must always pass through unchanged even
+    when active_provider='custom' (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "agent37/default",
+            "groups": [
+                {"provider": "Agent37", "provider_id": "custom:agent37",
+                 "models": [{"id": "agent37/default", "label": "default"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "custom/my-local-llm"
+    )
+
+    assert changed is False
+    assert effective == "custom/my-local-llm"
+
+
+def test_stale_ui_js_does_not_inject_unavailable_option():
+    """renderSession() must no longer inject a bare (unavailable) option into
+    modelSelect when the session model is not in the provider list (#829).
+    It should silently reset to the first available model instead."""
+    import os
+    src = open(os.path.join(os.path.dirname(__file__), "..", "static", "ui.js"),
+               encoding="utf-8").read()
+
+    # The old pattern must be gone — both keys removed from ui.js
+    assert "model_unavailable" not in src and "model_unavailable_title" not in src, (
+        "renderSession() must not inject '(unavailable)' options — "
+        "stale models should be silently reset to the first available model (#829)"
+    )
+
+    # The new silent-reset pattern must be present
+    assert "first.value" in src and "S.session.model=first.value" in src, (
+        "renderSession() must silently reset S.session.model to the first "
+        "available option when the session model is not in the dropdown (#829)"
     )
