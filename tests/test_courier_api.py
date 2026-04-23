@@ -92,7 +92,7 @@ def test_courier_dashboard_sessions_and_detail(base_url, cleanup_test_sessions):
     assert {"title", "status", "updatedAt"} <= set(detail.keys())
 
 
-def test_courier_session_control_explicit_unsupported(base_url, cleanup_test_sessions):
+def test_courier_session_control_supported(base_url, cleanup_test_sessions):
     sid, _ = make_session_tracked(cleanup_test_sessions)
     code, payload = _request(
         base_url,
@@ -102,8 +102,9 @@ def test_courier_session_control_explicit_unsupported(base_url, cleanup_test_ses
         bearer=COURIER_TOKEN,
     )
     assert code == 200
-    assert payload["supported"] is False
-    assert payload["status"] == "unsupported"
+    assert payload["supported"] is True
+    assert payload["status"] in {"accepted", "submitted"}
+    assert payload["action"] == "pause"
 
 
 def test_courier_approvals_and_decision(base_url, cleanup_test_sessions):

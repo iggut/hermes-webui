@@ -1317,6 +1317,9 @@ def handle_post(handler, parsed) -> bool:
         return _handle_clarify_respond(handler, body)
 
     # ── Skills (POST) ──
+    if parsed.path == "/api/skills/content":
+        return _handle_skill_content(handler, body)
+
     if parsed.path == "/api/skills/save":
         return _handle_skill_save(handler, body)
 
@@ -3259,6 +3262,43 @@ def _handle_session_compress(handler, body):
     except Exception as e:
         logger.warning("Manual session compression failed: %s", e)
         return bad(handler, f"Compression failed: {_sanitize_error(e)}")
+
+
+def _handle_skill_content(handler, body):
+    try:
+        require(body, "name")
+    except ValueError as e:
+        return bad(handler, str(e))
+    from tools.skills_tool import skill_view as _skill_view, SKILLS_DIR
+
+    name = body["name"].strip()
+    category = str(body.get("category") or "").strip()
+    file_path = str(body.get("file") or body.get("file_path") or "").strip()
+    if file_path:
+        import re as _re
+
+        if _re.search(r"[*?\[\]]", name):
+            return bad(handler, "Invalid skill name", 400)
+        skill_dir = None
+        for p in SKILLS_DIR.rglob(name):
+            if p.is_dir():
+                skill_dir = p
+                break
+        if not skill_dir:
+            return bad(handler, "Skill not found", 404)
+        target = (skill_dir / file_path).resolve()
+        try:
+            target.relative_to(skill_dir.resolve())
+        except ValueError:
+            return bad(handler, "Invalid file path", 400)
+        if not target.exists() or not target.is_file():
+            return bad(handler, "File not found", 404)
+        return j(handler, {"content": target.read_text(encoding="utf-8"), "path": file_path})
+    raw = _skill_view(name)
+    data = json.loads(raw) if isinstance(raw, str) else raw
+    if "linked_files" not in data:
+        data["linked_files"] = {}
+    return j(handler, data)
 
 
 def _handle_skill_save(handler, body):

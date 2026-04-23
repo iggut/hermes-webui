@@ -21,9 +21,9 @@ from api.courier_events import handle_courier_events_get
 from api.courier_library import handle_courier_library_get
 from api.courier_pairing import courier_pairing_deployment_snapshot
 from api.helpers import bad, j
-from api.models import all_sessions, get_session, new_session
+from api.models import all_sessions, get_cli_session_messages, get_cli_sessions, get_session, new_session
 from api.streaming import _run_agent_streaming
-from api.streaming import _get_ai_agent
+from api.streaming import _get_ai_agent, cancel_stream
 
 try:
     from tools.approval import _pending, _lock
@@ -184,6 +184,98 @@ def _session_summary(compact: dict) -> dict:
     }
 
 
+def _merged_sessions() -> list[dict]:
+    webui_sessions = list(all_sessions())
+    webui_ids = {str(s.get("session_id") or "") for s in webui_sessions if s.get("session_id")}
+    merged = webui_sessions + [s for s in get_cli_sessions() if s.get("session_id") not in webui_ids]
+    merged.sort(key=lambda s: s.get("updated_at", 0) or 0, reverse=True)
+    return merged
+
+
+def _load_session_like(session_id: str) -> dict | None:
+    try:
+        return get_session(session_id).compact(include_runtime=True)
+    except KeyError:
+        pass
+    for cli_session in get_cli_sessions():
+        if cli_session.get("session_id") == session_id:
+            return cli_session
+    return None
+
+
+def _mutate_session_control(session_id: str, action: str) -> dict:
+    try:
+        session = get_session(session_id)
+    except KeyError:
+        cli_session = next((s for s in get_cli_sessions() if s.get("session_id") == session_id), None)
+        if cli_session is not None:
+            return {
+                "sessionId": session_id,
+                "action": action,
+                "status": "unsupported",
+                "detail": "CLI-backed sessions are read-only in Hermes WebUI.",
+                "updatedAt": _iso_timestamp(time.time()),
+                "supported": False,
+                "endpoint": f"/v1/sessions/{session_id}/actions",
+            }
+        raise
+
+    if action == "pause":
+        if session.active_stream_id:
+            cancelled = cancel_stream(session.active_stream_id)
+            detail = "Active stream cancelled." if cancelled else "No active stream was running."
+        else:
+            detail = "Session is already idle."
+        session.save()
+        return {
+            "sessionId": session_id,
+            "action": action,
+            "status": "accepted",
+            "detail": detail,
+            "updatedAt": _iso_timestamp(session.updated_at),
+            "supported": True,
+            "endpoint": f"/v1/sessions/{session_id}/actions",
+        }
+
+    if action == "resume":
+        session.archived = False
+        session.save()
+        return {
+            "sessionId": session_id,
+            "action": action,
+            "status": "accepted",
+            "detail": "Session marked active.",
+            "updatedAt": _iso_timestamp(session.updated_at),
+            "supported": True,
+            "endpoint": f"/v1/sessions/{session_id}/actions",
+        }
+
+    if action == "terminate":
+        if session.active_stream_id:
+            cancel_stream(session.active_stream_id)
+        session.archived = True
+        session.save()
+        return {
+            "sessionId": session_id,
+            "action": action,
+            "status": "accepted",
+            "detail": "Session terminated and archived.",
+            "updatedAt": _iso_timestamp(session.updated_at),
+            "supported": True,
+            "endpoint": f"/v1/sessions/{session_id}/actions",
+        }
+
+    return {
+        "sessionId": session_id,
+        "action": action,
+        "status": "failed",
+        "detail": f"Unsupported session action: {action}",
+        "updatedAt": _iso_timestamp(time.time()),
+        "supported": False,
+        "endpoint": f"/v1/sessions/{session_id}/actions",
+    }
+
+
 def _resolve_target_session_id(query: str = "") -> str | None:
     sid = ""
     if query:
@@ -191,7 +283,7 @@ def _resolve_target_session_id(query: str = "") -> str | None:
         sid = (qs.get("sessionId", [""])[0] or qs.get("session_id", [""])[0]).strip()
     if sid:
         return sid
-    sessions = all_sessions()
+    sessions = _merged_sessions()
     if not sessions:
         return None
     return sessions[0].get("session_id")
@@ -272,7 +364,32 @@ def _conversation_events_for_session(session_id: str, limit: int = 40) -> list[d
     try:
         s = get_session(session_id)
     except KeyError:
-        return []
+        cli_messages = get_cli_session_messages(session_id)
+        events = []
+        for idx, msg in enumerate(cli_messages[-limit:]):
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "")
+            if role not in ("user", "assistant", "system"):
+                continue
+            body = _extract_text(msg)
+            if not body:
+                continue
+            event = {
+                "sessionId": session_id,
+                "eventId": f"{session_id}:{idx}",
+                "author": "You" if role == "user" else ("Hermes" if role == "assistant" else role),
+                "body": body,
+                "timestamp": _iso_timestamp(msg.get("timestamp") or msg.get("_ts") or msg.get("created_at") or time.time()),
+            }
+            reasoning = _extract_reasoning(msg)
+            if reasoning:
+                event["reasoning"] = reasoning
+            tool_calls = _extract_tool_calls(msg)
+            if tool_calls:
+                event["toolCalls"] = tool_calls
+            events.append(event)
+        return events
     events = []
     for idx, msg in enumerate(s.messages[-limit:]):
         if not isinstance(msg, dict):
@@ -440,7 +557,7 @@ def handle_courier_get(handler, parsed) -> bool:
         return j(handler, courier_runtime_status())
 
     if parsed.path == "/v1/dashboard":
-        sessions = all_sessions()
+        sessions = _merged_sessions()
         pending = _list_pending_approvals()
         connected = "connected"
         return j(
@@ -454,17 +571,15 @@ def handle_courier_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/v1/sessions":
-        return j(handler, [_session_summary(s) for s in all_sessions()])
+        return j(handler, [_session_summary(s) for s in _merged_sessions()])
 
     if parsed.path.startswith("/v1/sessions/"):
         rest = parsed.path.removeprefix("/v1/sessions/")
         if "/" not in rest:
             sid = rest
-            try:
-                s = get_session(sid)
-            except KeyError:
+            compact = _load_session_like(sid)
+            if compact is None:
                 return bad(handler, "Session not found", 404)
-            compact = s.compact()
             return j(handler, _session_summary(compact))
 
     if parsed.path == "/v1/approvals":
@@ -586,36 +701,18 @@ def handle_courier_post(handler, parsed, body) -> bool:
         parts = parsed.path.split("/")
         sid = parts[3] if len(parts) > 3 else ""
         action = str(body.get("action") or "").strip().lower() or "unknown"
-        return j(
-            handler,
-            {
-                "sessionId": sid,
-                "action": action,
-                "status": "unsupported",
-                "detail": "Session-control actions are not mapped in Hermes WebUI yet.",
-                "updatedAt": _iso_timestamp(time.time()),
-                "supported": False,
-                "endpoint": parsed.path,
-            },
-        )
+        if action not in {"pause", "resume", "terminate"}:
+            return bad(handler, f"Unsupported session action: {action}", 400)
+        return j(handler, _mutate_session_control(sid, action))
 
     if parsed.path.startswith("/v1/sessions/"):
         parts = parsed.path.split("/")
         if len(parts) == 5:
             sid = parts[3]
             action = str(parts[4] or "").strip().lower()
-            return j(
-                handler,
-                {
-                    "sessionId": sid,
-                    "action": action or "unknown",
-                    "status": "unsupported",
-                    "detail": "Session-control actions are not mapped in Hermes WebUI yet.",
-                    "updatedAt": _iso_timestamp(time.time()),
-                    "supported": False,
-                    "endpoint": parsed.path,
-                },
-            )
+            if action not in {"pause", "resume", "terminate"}:
+                return bad(handler, f"Unsupported session action: {action}", 400)
+            return j(handler, _mutate_session_control(sid, action))
 
     if parsed.path.startswith("/v1/approvals/") and parsed.path.endswith("/decision"):
         approval_id = parsed.path.split("/")[3]
