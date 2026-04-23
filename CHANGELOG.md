@@ -29,6 +29,26 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.174] — 2026-04-23
+
+### Fixed
+- **Interleaved streaming order (Text → Thinking → Tool → Text)** — after a tool call completes, new text tokens now create a new DOM segment below the tool card instead of updating the old segment above it. Adds `segmentStart`/`_freshSegment` flags to track segment boundaries; scopes the streaming cursor to the last live assistant segment only; adds a 3-dot waiting indicator below each tool card; fixes `appendLiveToolCard`/`appendThinking` anchor logic for multi-tool sequences. (`static/messages.js`, `static/ui.js`, `static/style.css`) Co-authored by @bsgdigital.
+
+## [v0.50.173] — 2026-04-23
+
+### Fixed
+- **Ordered list items always showed "1." regardless of position** — when LLMs
+  output numbered lists with blank lines between items, the paragraph-splitter
+  in `renderMd()` placed each item in its own `<ol>` container, causing every
+  `<ol>` to restart at 1. Fixed by emitting `value="N"` on each `<li>` so the
+  correct ordinal is preserved even when items are split across multiple `<ol>`
+  wrappers. (`static/ui.js`) Closes #886. Co-authored by @bsgdigital.
+
+## [v0.50.172] — 2026-04-23
+
+### Fixed
+- **Stop Generation preserves partial streamed content** — clicking Stop Generation previously discarded all text the agent had produced, showing only "*Task cancelled.*". The server now accumulates streamed tokens in a per-stream buffer and persists any partial assistant content to the session when a cancel fires. Thinking/reasoning blocks (`<think>...</think>`, including unclosed tags — the common cancel-mid-reasoning case) are stripped before saving. The partial content is flagged `_partial: true` and kept in conversation history so the model can continue from it on the next user message. (`api/config.py`, `api/streaming.py`) Closes #893.
+
 ## [v0.50.171] — 2026-04-23
 
 ### Fixed
