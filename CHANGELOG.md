@@ -29,6 +29,27 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.177] — 2026-04-23
+
+### Fixed
+- **Settings dialog and message controls unusable on mobile** — three mobile usability fixes: (1) settings tab strip replaced by a native `<select>` dropdown on narrow viewports, panel goes full-width; (2) provider card Save/Remove buttons become icon-only on mobile so the API key input fills the available width; (3) message timestamps, copy, and edit buttons are always visible on touch screens (no hover state on mobile). (`static/index.html`, `static/panels.js`, `static/style.css`) Co-authored by @bsgdigital.
+## [v0.50.178] — 2026-04-23
+
+### Added
+- **PWA support — installable as a standalone app** — adds a Web App Manifest (`manifest.json`) and a minimal service worker (`sw.js`) with cache-first strategy for app shell assets and network-bypass for all `/api/*` and `/stream` endpoints. Cache name auto-busts on every deploy via git-derived version injection. Enables "Add to Home Screen" on Android, iOS, and desktop Chrome without any offline API response caching (live backend always required). (`static/manifest.json`, `static/sw.js`, `static/index.html`, `api/routes.py`) Closes #685. Co-authored by @bsgdigital.
+
+## [v0.50.176] — 2026-04-23
+
+### Fixed
+- **Duplicate model dropdown entries when CLI default matches live-fetched model** — `_addLiveModelsToSelect()` now normalises IDs before the dedup check (strips `@provider:` prefix using `indexOf`+`substring` to preserve multi-colon Ollama tag suffixes like `qwen3-vl:235b-instruct`, strips namespace prefix, unifies separators). (`static/ui.js`) Closes #907.
+- **New Chat uses stale default model after saving Preferences without reload** — `window._defaultModel` is now updated in `_applySavedSettingsUi()` so `newSession()` picks up the newly saved default immediately. (`static/panels.js`) Closes #908.
+- **Injected CLI default model shows raw lowercase label** — new `_get_label_for_model()` helper looks up the model's formatted label from existing catalog groups before falling back to title-casing the bare ID. (`api/config.py`) Closes #909.
+
+## [v0.50.175] — 2026-04-23
+
+### Fixed
+- **Session persistence hardened against concurrent write races** — all session-mutation paths (streaming success/error/cancel, periodic checkpoint, HTTP endpoints for title/personality/workspace/clear/pin/archive/project) now hold a per-session `_agent_lock` during in-memory mutation and `Session.save()`. The checkpoint thread is stopped and joined before the final save, preventing stale object clobbers. `Session.save()` uses fsync + atomic rename with a pid+thread_id tmp suffix. `_write_session_index()` gets a dedicated `_INDEX_WRITE_LOCK` so disk I/O runs outside the global `LOCK`, reducing head-of-line blocking. Context compression now runs the LLM call outside the lock with a stale-edit check (409) on write-back. (`api/streaming.py`, `api/models.py`, `api/routes.py`, `api/session_ops.py`, `api/config.py`) Closes #765. Co-authored by @starship-s.
+
 ## [v0.50.174] — 2026-04-23
 
 ### Fixed

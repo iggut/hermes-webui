@@ -1079,6 +1079,39 @@ def invalidate_models_cache():
         _available_models_cache_ts = 0.0
 
 
+def _get_label_for_model(model_id: str, existing_groups: list) -> str:
+    """Return a human-friendly label for *model_id*.
+
+    Resolution order:
+    1. If the model already appears in *existing_groups* with a label, use it.
+    2. Strip @provider: prefix and namespace prefix, then title-case.
+
+    This ensures the injected default model entry in the dropdown always shows
+    the same label as the live-fetched or static-catalog version, rather than
+    the raw lowercase ID string (#909).
+    """
+    # Strip @provider: prefix for lookup
+    lookup_id = model_id
+    if lookup_id.startswith("@") and ":" in lookup_id:
+        lookup_id = lookup_id.split(":", 1)[1]
+
+    # Check existing groups for a matching label
+    _norm = lambda s: (s.split("/", 1)[-1] if "/" in s else s).replace("-", ".").lower()
+    norm_lookup = _norm(lookup_id)
+    for g in existing_groups:
+        for m in g.get("models", []):
+            if m.get("label") and _norm(str(m.get("id", ""))) == norm_lookup:
+                return m["label"]
+
+    # Fall back: capitalize each hyphen-separated word, preserve dots in version numbers.
+    # The catalog lookup above handles well-known models; this only fires for unlisted IDs.
+    bare = lookup_id.split("/")[-1] if "/" in lookup_id else lookup_id
+    return " ".join(
+        w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
+        for w in bare.replace("_", "-").split("-")
+    )
+
+
 def get_available_models() -> dict:
     """
     Return available models grouped by provider.
@@ -1458,7 +1491,7 @@ def get_available_models() -> dict:
             _cp_model = _cp.get("model", "")
             _cp_name = (_cp.get("name") or "").strip()
             if _cp_model and _cp_model not in _seen_custom_ids:
-                _cp_label = _cp_model.split("/")[-1] if "/" in _cp_model else _cp_model
+                _cp_label = _get_label_for_model(_cp_model, [])
                 _seen_custom_ids.add(_cp_model)
                 if _cp_name:
                     # Named custom provider — own group keyed by slug
@@ -1592,7 +1625,7 @@ def get_available_models() -> dict:
         # can at least send messages with their current setting. Avoid showing a
         # generic multi-provider list — those models wouldn't be routable anyway.
         if default_model:
-            label = default_model.split("/")[-1] if "/" in default_model else default_model
+            label = _get_label_for_model(default_model, groups)
             groups.append(
                 {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
             )
@@ -1614,9 +1647,7 @@ def get_available_models() -> dict:
             # vs display name 'OpenAI Codex' (hyphen vs. space), which
             # silently falls through to groups[0] and lands the model in
             # the wrong group.
-            label = (
-                default_model.split("/")[-1] if "/" in default_model else default_model
-            )
+            label = _get_label_for_model(default_model, groups)
             target_display = (
                 _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
                 if active_provider
@@ -1691,6 +1722,25 @@ SESSION_AGENT_LOCKS_LOCK = threading.Lock()
 
 
 def _get_session_agent_lock(session_id: str) -> threading.Lock:
+    """Return the per-session Lock used to serialize all Session mutations.
+
+    Lock lifecycle invariant:
+      - A Lock is created lazily on first access and lives in SESSION_AGENT_LOCKS
+        for the lifetime of the session.
+      - The entry is pruned in /api/session/delete (under SESSION_AGENT_LOCKS_LOCK)
+        so deleted sessions don't leak a Lock forever.
+      - During context compression the agent may rotate session_id.  The
+        streaming thread migrates the lock entry atomically under
+        SESSION_AGENT_LOCKS_LOCK: it aliases the new session_id to the *same*
+        Lock object and pops the old-id entry (see streaming.py compression
+        block).  This ensures that subsequent callers using the new ID still
+        acquire the same Lock, while the old-id entry is removed to prevent a
+        leak.  The streaming thread already holds the Lock during this
+        migration, so the reference stays alive even after the dict entry is
+        removed.
+      - Lock contract: hold for the in-memory mutation + s.save() only; never
+        across network I/O (LLM calls, HTTP requests).
+    """
     with SESSION_AGENT_LOCKS_LOCK:
         if session_id not in SESSION_AGENT_LOCKS:
             SESSION_AGENT_LOCKS[session_id] = threading.Lock()
