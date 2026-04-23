@@ -10,10 +10,19 @@ Covers:
   - show|hide present as subArgs in COMMANDS entry
 """
 
+import json
 import pathlib
 import re
 
 REPO = pathlib.Path(__file__).parent.parent
+
+
+def _load_config_text(text):
+    try:
+        import yaml as _yaml
+        return _yaml.safe_load(text)
+    except Exception:
+        return json.loads(text)
 
 
 def read(rel):
@@ -307,8 +316,7 @@ class TestReasoningConfigHelpers:
         cfgfile = tmp_path / 'config.yaml'
         monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
         cfg.set_reasoning_effort('high')
-        import yaml as _yaml
-        data = _yaml.safe_load(cfgfile.read_text(encoding='utf-8'))
+        data = _load_config_text(cfgfile.read_text(encoding='utf-8'))
         assert data.get('agent', {}).get('reasoning_effort') == 'high', (
             "agent.reasoning_effort must be persisted to config.yaml"
         )
@@ -320,13 +328,12 @@ class TestReasoningConfigHelpers:
         cfgfile = tmp_path / 'config.yaml'
         monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
         cfg.set_reasoning_display(False)
-        import yaml as _yaml
-        data = _yaml.safe_load(cfgfile.read_text(encoding='utf-8'))
+        data = _load_config_text(cfgfile.read_text(encoding='utf-8'))
         assert data.get('display', {}).get('show_reasoning') is False, (
             "display.show_reasoning must be persisted to config.yaml"
         )
         cfg.set_reasoning_display(True)
-        data = _yaml.safe_load(cfgfile.read_text(encoding='utf-8'))
+        data = _load_config_text(cfgfile.read_text(encoding='utf-8'))
         assert data.get('display', {}).get('show_reasoning') is True
 
     def test_set_reasoning_effort_rejects_invalid(self, tmp_path, monkeypatch):

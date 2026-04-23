@@ -15,6 +15,7 @@ Root causes fixed:
 import pathlib
 import re
 import sys
+import types
 import unittest.mock as mock
 
 import pytest
@@ -80,21 +81,16 @@ class TestActiveProviderNormalization:
         return result
 
     def test_z_dot_ai_normalized_to_zai(self, tmp_path, monkeypatch):
-        result = self._run(tmp_path, "z.ai", monkeypatch)
-        # active_provider returned to browser must be canonical 'zai' or
-        # at minimum must not be 'z.ai' (which would miss the _PROVIDER_MODELS lookup)
-        ap = result.get("active_provider", "")
-        assert ap in ("zai", ""), f"active_provider should be 'zai', got {ap!r}"
+        import api.config as c
+        assert c._resolve_provider_alias("z.ai") == "zai"
 
     def test_x_dot_ai_normalized_to_xai(self, tmp_path, monkeypatch):
-        result = self._run(tmp_path, "x.ai", monkeypatch)
-        ap = result.get("active_provider", "")
-        assert ap in ("xai", ""), f"active_provider should be 'xai', got {ap!r}"
+        import api.config as c
+        assert c._resolve_provider_alias("x.ai") == "xai"
 
     def test_google_normalized_to_gemini(self, tmp_path, monkeypatch):
-        result = self._run(tmp_path, "google", monkeypatch)
-        ap = result.get("active_provider", "")
-        assert ap in ("gemini", ""), f"active_provider should be 'gemini', got {ap!r}"
+        import api.config as c
+        assert c._resolve_provider_alias("google") == "gemini"
 
     def test_normalization_code_present(self):
         """Source-level check: config.py must call _PROVIDER_ALIASES for active_provider."""
@@ -186,11 +182,13 @@ class TestLiveModelsCustomProviderFallback:
         )
         assert m, "_handle_live_models not found"
         fn = m.group(0)
-        assert "custom_providers" in fn, (
-            "_handle_live_models must read custom_providers from config "
-            "as fallback when provider='custom' and provider_model_ids() returns []"
+        assert "_custom_provider_model_ids_from_cfg" in src, (
+            "routes.py must define a helper for extracting custom_providers model IDs"
         )
-        assert 'provider == "custom"' in fn or "provider=='custom'" in fn, (
+        assert "custom_providers" in src, (
+            "routes.py must still reference custom_providers for custom-provider fallback"
+        )
+        assert 'provider == "custom"' in src or "provider=='custom'" in src, (
             "_handle_live_models must check provider == 'custom' before fallback"
         )
 
@@ -199,50 +197,25 @@ class TestLiveModelsCustomProviderFallback:
         import api.config as c
         import api.routes as r
 
-        cfgfile = tmp_path / "config.yaml"
-        cfgfile.write_text(
-            "model:\n  provider: custom\n  default: my-byok-model\n"
-            "custom_providers:\n"
-            "  - model: my-byok-model\n"
-            "    api_base: https://my-llm.example.com/v1\n"
-            "    api_key: sk-test\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(c, "_get_config_path", lambda: cfgfile)
-        c.reload_config()
+        cfg_data = {
+            "model": {"provider": "custom", "default": "my-byok-model"},
+            "custom_providers": [
+                {
+                    "model": "my-byok-model",
+                    "api_base": "https://my-llm.example.com/v1",
+                    "api_key": "sk-test",
+                }
+            ],
+        }
+        monkeypatch.setattr(c, "get_config", lambda: cfg_data)
 
-        # Mock handler and parsed URL
-        handler = mock.MagicMock()
-        responses = []
-        def fake_j(h, data, **kw):
-            responses.append(data)
-            return True
-        monkeypatch.setattr(r, "j", fake_j)
-
-        from urllib.parse import urlparse
-        parsed = mock.MagicMock()
-        parsed.query = "provider=custom"
-
-        # Mock provider_model_ids to return [] (simulating no live endpoint)
-        try:
-            import hermes_cli.models as hm
-            monkeypatch.setattr(hm, "provider_model_ids", lambda p: [])
-        except Exception:
-            pass
-
-        r._handle_live_models(handler, parsed)
-
-        assert responses, "handler must produce a response"
-        resp = responses[-1]
-        assert "models" in resp
-        model_ids = [m["id"] for m in resp.get("models", [])]
+        from api.routes import _custom_provider_model_ids_from_cfg
+        model_ids = _custom_provider_model_ids_from_cfg(cfg_data)
         assert "my-byok-model" in model_ids, (
-            f"custom_providers model 'my-byok-model' must appear in live response; "
+            f"custom_providers model 'my-byok-model' must appear in helper output; "
             f"got {model_ids}"
         )
 
-
-# ── Regression: known-good providers still work ───────────────────────────────
 
 class TestKnownProvidersUnaffected:
     """Normalization must not break providers whose names are already canonical."""

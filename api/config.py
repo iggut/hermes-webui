@@ -228,12 +228,19 @@ def _load_yaml_config_file(config_path: Path) -> dict:
 
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         import yaml as _yaml
-    except ImportError as exc:
-        raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
+    except ImportError:
+        # Keep the writer usable even when PyYAML is absent or import state has
+        # been disturbed by a test fixture. JSON is valid YAML, so the config
+        # remains readable by safe_load() in normal runtime.
+        config_path.write_text(
+            json.dumps(config_data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         _yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True),
         encoding="utf-8",

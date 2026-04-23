@@ -2210,6 +2210,23 @@ def _handle_clarify_inject(handler, parsed):
     return j(handler, {"error": "session_id required"}, status=400)
 
 
+def _custom_provider_model_ids_from_cfg(cfg: dict) -> list[str]:
+    """Return model ids declared under config.yaml custom_providers."""
+    ids: list[str] = []
+    try:
+        entries = cfg.get("custom_providers", []) if isinstance(cfg, dict) else []
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                model = (entry.get("model") or "").strip()
+                if model and model not in ids:
+                    ids.append(model)
+    except Exception:
+        pass
+    return ids
+
+
 def _handle_live_models(handler, parsed):
     """Return the live model list for a provider.
 
@@ -2265,22 +2282,20 @@ def _handle_live_models(handler, parsed):
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
 
-        if not ids:
-            # For 'custom' provider, provider_model_ids() returns [] because
-            # 'custom' isn't a real endpoint.  Fall back to the custom_providers
-            # entries from config.yaml so the live-model enrichment step can
-            # add any models that weren't already in the static list.
-            if provider == "custom":
-                try:
-                    _cp_entries = cfg.get("custom_providers", [])
-                    if isinstance(_cp_entries, list):
-                        ids = [
-                            _cp.get("model", "")
-                            for _cp in _cp_entries
-                            if isinstance(_cp, dict) and _cp.get("model", "")
-                        ]
-                except Exception:
-                    pass
+        if provider == "custom":
+            try:
+                from api.config import _get_config_path as _gcp, _load_yaml_config_file as _lycf
+
+                _raw_cfg = _lycf(_gcp())
+                _cp_ids = _custom_provider_model_ids_from_cfg(_raw_cfg)
+                if _cp_ids:
+                    if ids:
+                        seen = set(ids)
+                        ids.extend([_id for _id in _cp_ids if _id not in seen])
+                    else:
+                        ids = _cp_ids
+            except Exception:
+                pass
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider
