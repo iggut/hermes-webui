@@ -5,6 +5,11 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.189 — 2026-04-24
+
+### Fixed
+- **CSP: explicit `manifest-src 'self'` directive** — adds `manifest-src 'self'` to the `Content-Security-Policy` header. Browsers fall back to `default-src` when `manifest-src` is absent (functionally correct), but the explicit directive satisfies strict CSP audits and avoids any browser-specific deviation. Includes regression test. (`api/helpers.py`, `tests/test_pwa_manifest_csp.py`) By @24601. [#961]
+
 ## v0.50.188 — 2026-04-24
 
 ### Fixed
