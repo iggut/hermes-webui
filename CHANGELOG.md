@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
+
+## v0.50.184 — 2026-04-24
+
+### Fixed
+- **Reasoning chip dropdown now opens correctly** — the dropdown was placed inside `.composer-left` which has `overflow-y: hidden`, clipping the upward-opening menu entirely. Moved `#composerReasoningDropdown` outside to sit alongside the model/profile/workspace dropdowns and added `_positionReasoningDropdown()` for consistent chip-aligned positioning. Z-index raised to 200 to match other composer dropdowns. (`static/index.html`, `static/style.css`, `static/ui.js`)
+- **Reasoning chip icon is now a monochrome SVG** — replaced the `🧠` emoji in the label with a `stroke="currentColor"` brain-outline SVG matching the style of all other composer chips. (`static/index.html`, `static/ui.js`)
+- **`/reasoning <level>` now immediately updates the chip** — previously called `syncReasoningChip()` which re-applied the stale cached value. Now calls `_applyReasoningChip(eff)` directly with the server-confirmed effort level. (`static/commands.js`)
+- **`/btw` answer no longer vanishes after rendering** — `onerror` was firing when the server cleanly closed the SSE connection after `stream_end`, removing the just-rendered answer bubble. A `_streamDone` flag now prevents `onerror` from wiping the row after a successful stream. Also added `_ensureBtwRow()` call in `done` handler so the bubble renders even if no `token` events arrived. (`static/messages.js`) Closes #933.
+
 ### Added
 - **Session attention indicators in the sidebar** — the session list now shows a
   spinning indicator while a session is actively streaming (even in the
@@ -28,6 +39,35 @@
   limited to trusted roots (home, saved workspaces, and the boot default
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
+
+## [v0.50.183] — 2026-04-24
+
+### Added
+- **`/btw` slash command** — ask an ephemeral side question using current session context without adding to history. Creates a hidden session, streams the answer in a visually distinct bubble, then discards the session. Includes `attachBtwStream()` SSE consumer and `POST /api/btw` route. (`api/routes.py`, `api/background.py`, `static/commands.js`, `static/messages.js`, `static/style.css`)
+- **`/background` slash command** — run a prompt in a parallel background agent without blocking the active conversation. Frontend polls `GET /api/background/status` for results and displays completed answers inline. Includes badge indicator in composer footer. (`api/routes.py`, `api/background.py`, `static/commands.js`, `static/messages.js`, `static/index.html`)
+- **Undo button on last assistant message** — surfaced as an ↩ icon on the last assistant message, calling the existing `/undo` command for discoverability. (`static/ui.js`)
+- **Reasoning effort chip in composer** — visual chip to set reasoning effort level from the composer footer without typing a command. (`static/ui.js`, `static/index.html`, `static/style.css`)
+
+### Fixed
+- **Background task completion hook wired** — `complete_background()` was never called after a background agent finished, so tasks stayed in `status="running"` forever and polling always returned `[]`. Fixed by wrapping `_run_agent_streaming` in `_run_bg_and_notify` which extracts the last assistant message and signals the tracker. Also fixed `get_results()` to retain in-flight tasks during polls so concurrent tasks are not dropped. (`api/background.py`, `api/routes.py`, `tests/test_background_tasks.py`)
+- **Ephemeral sessions correctly skip persistence** — added `return` after the ephemeral `done` event in `_run_agent_streaming()`, preventing ephemeral session state from being written to disk after stream completion. (`api/streaming.py`)
+
+Co-authored by @bergeouss.
+
+## [v0.50.181] — 2026-04-24
+
+### Changed
+- **Vendor streaming-markdown@0.2.15** — self-hosts the incremental markdown parser instead of loading it from jsDelivr CDN. The library (12.6 KB) is committed to `static/vendor/smd.min.js` so the app works fully offline / air-gapped, and the exact bytes are pinned in version control. SHA-384 hash preserved in an HTML comment for manual audit. (`static/vendor/smd.min.js`, `static/index.html`) Co-authored by @bsgdigital.
+
+## [v0.50.180] — 2026-04-23
+
+### Added
+- **Incremental streaming markdown via `streaming-markdown`** — replaces the per-animation-frame full `innerHTML` re-render with an incremental DOM-building parser. During streaming, only new character deltas are fed to the parser per frame (`_smdWrite()`), eliminating DOM thrashing and improving rendering smoothness. Prism.js / KaTeX state no longer gets reset mid-stream. Falls back to the existing `renderMd()` path when the library is unavailable. (`static/messages.js`, `static/index.html`) Co-authored by @bsgdigital.
+
+## [v0.50.179] — 2026-04-23
+
+### Fixed
+- **Onboarding wizard clobbering CLI users' config after server restart** — CLI-configured users (who set up via `hermes model` / `hermes auth`) had no `onboarding_completed` flag in `settings.json`. After a git branch switch or server restart, `verify_hermes_imports()` could momentarily return `imports_ok=False`, making `chat_ready=False` and causing the wizard to reappear with a destructive dropdown default (openrouter). Fixed by writing `onboarding_completed: True` to `settings.json` the first time `config_auto_completed` evaluates to `True`, so the flag survives future transient import failures. (`api/onboarding.py`) Co-authored by @bsgdigital.
 
 ## [v0.50.177] — 2026-04-23
 

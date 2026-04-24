@@ -189,6 +189,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let assistantBody=null;
   let segmentStart=0;      // char offset in assistantText where current segment begins
   let _freshSegment=false; // true after a tool call — forces a new DOM segment
+  // streaming-markdown state: incremental DOM-building parser per segment
+  let _smdParser=null;     // current smd parser instance (null until first content)
+  let _smdWrittenLen=0;    // how many chars of displayText have been fed to smd parser
+  // On reconnect, the assistantBody already has partial smd-rendered content.
+  // We clear it on first new token and restart the parser from the reconnect point.
+  let _smdReconnect=reconnecting;
   // Thinking tag patterns for streaming display
   const _thinkPairs=[
     {open:'<think>',close:'</think>'},
@@ -366,6 +372,59 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // removeThinking() won't find it anyway, but guard explicitly.
     if(!reasoningText) removeThinking();
   }
+  // Helper: create (or recreate) the smd parser bound to a given DOM element.
+  // Called when assistantBody is first created and after each tool-call segment reset.
+  function _smdNewParser(el){
+    _smdWrittenLen=0;
+    if(!window.smd){_smdParser=null;return;}
+    const renderer=window.smd.default_renderer(el);
+    _smdParser=window.smd.parser(renderer);
+  }
+  // Helper: end the current smd parser (flushes remaining state) and null it out.
+  function _smdEndParser(){
+    if(_smdParser&&window.smd){
+      try{window.smd.parser_end(_smdParser);}catch(_){}
+      // parser_end may flush remaining markdown that creates new links/images —
+      // re-sanitize the body before the DOM is handed off to highlightCode / renderMessages.
+      if(assistantBody){_sanitizeSmdLinks(assistantBody);}
+    }
+    _smdParser=null;
+    _smdWrittenLen=0;
+  }
+  // Helper: feed new displayText delta to the smd parser.
+  // Only feeds chars beyond what has already been written (_smdWrittenLen).
+  function _smdWrite(displayText){
+    if(!_smdParser||!window.smd) return;
+    const delta=displayText.slice(_smdWrittenLen);
+    if(!delta) return;
+    try{window.smd.parser_write(_smdParser,delta);}catch(_){}
+    _smdWrittenLen=displayText.length;
+    // streaming-markdown does NOT sanitize URL schemes — `[click](javascript:...)`
+    // and `![alt](javascript:...)` survive as href/src.  Strip any unsafe schemes
+    // from anchors/images that were just added to the live DOM.  The existing
+    // renderMd() path filters these via its http(s)-only regex; we need a matching
+    // guard here so the live-stream path isn't an XSS vector for agent-echoed
+    // prompt-injection content.  The final renderMessages() call at `done` uses
+    // renderMd which is already safe, but during streaming the user could click
+    // a malicious link before that replacement happens.
+    if(assistantBody){_sanitizeSmdLinks(assistantBody);}
+  }
+  // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
+  // Matches the effective allowlist of renderMd() (http/https via regex + relative).
+  const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
+  function _sanitizeSmdLinks(root){
+    if(!root||!root.querySelectorAll) return;
+    const _a=root.querySelectorAll('a[href]');
+    for(let i=0;i<_a.length;i++){
+      const n=_a[i],v=n.getAttribute('href')||'';
+      if(!_SMD_SAFE_URL_RE.test(v)){n.removeAttribute('href');n.setAttribute('data-blocked-scheme','1');}
+    }
+    const _im=root.querySelectorAll('img[src]');
+    for(let i=0;i<_im.length;i++){
+      const n=_im[i],v=n.getAttribute('src')||'';
+      if(!_SMD_SAFE_URL_RE.test(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
+    }
+  }
   function _scheduleRender(){
     if(_renderPending) return;
     if(_streamFinalized) return; // Bug A: don't schedule new rAF after stream finalized
@@ -376,12 +435,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const parsed=_parseStreamState();
       _renderLiveThinking(parsed);
       if(assistantBody){
-        // Render only the text belonging to the current segment (after the last tool call).
-        // segmentStart=0 for the first segment, or assistantText.length-at-last-tool for later ones.
-        const segText = segmentStart===0
-          ? parsed.displayText                          // first segment: use full display (handles think-tag stripping)
-          : renderMd ? renderMd(assistantText.slice(segmentStart)) : assistantText.slice(segmentStart);
-        assistantBody.innerHTML = segText || '';
+        const displayText = segmentStart===0
+          ? parsed.displayText                          // first segment: uses think-tag stripping
+          : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        if(!_smdParser&&window.smd){
+          // On reconnect: prior content in assistantBody came from a different smd parser run.
+          // Clear it and start fresh — renderMessages() on done will restore the full content.
+          if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
+          _smdNewParser(assistantBody);
+        }
+        if(_smdParser){
+          _smdWrite(displayText);
+        } else {
+          // Fallback: smd not loaded yet, reconnect session, or smd unavailable — use renderMd
+          assistantBody.innerHTML = (segmentStart===0
+            ? parsed.displayText
+            : renderMd ? renderMd(assistantText.slice(segmentStart)) : assistantText.slice(segmentStart)) || '';
+        }
       }
       scrollIfPinned();
     });
@@ -461,6 +531,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       assistantBody=null;
       segmentStart=assistantText.length; // new segment starts at current text length
       _freshSegment=true;                // prevent reuse of old DOM node
+      _smdEndParser();                   // finalize current smd parser; new one created on next token
       scrollIfPinned();
     });
 
@@ -551,6 +622,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFinalized=true;
       if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+      // Finalize smd parser — flushes any remaining buffered markdown state
+      // and runs Prism + copy buttons on the live segment before the DOM is replaced
+      if(assistantBody){
+        const _finBody=assistantBody;
+        _smdEndParser();
+        requestAnimationFrame(()=>{
+          if(typeof highlightCode==='function') highlightCode(_finBody);
+          if(typeof addCopyButtons==='function') addCopyButtons(_finBody);
+          if(typeof renderKatexBlocks==='function') renderKatexBlocks();
+        });
+      } else {
+        _smdEndParser();
+      }
       const d=JSON.parse(e.data);
       delete INFLIGHT[activeSid];
       clearInflight();clearInflightState(activeSid);
@@ -617,6 +701,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       _streamFinalized=true;
       if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
@@ -694,6 +779,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       _streamFinalized=true;
       if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
       delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
@@ -1235,6 +1321,117 @@ function sendBrowserNotification(title,body){
       if(p==='granted') new Notification(title||botName,{body:body});
     });
   }
+}
+
+// ── /btw ephemeral stream ────────────────────────────────────────────────────
+// Connects to the ephemeral SSE stream from /api/btw and renders the answer
+// in a visually distinct bubble that is NOT persisted to session history.
+
+function attachBtwStream(parentSid, streamId, question){
+  if(!parentSid||!streamId) return;
+  const src=new EventSource('/api/stream?stream_id='+encodeURIComponent(streamId));
+  let answer='';
+  let btwRow=null;
+  let _streamDone=false;
+  function _ensureBtwRow(){
+    if(btwRow&&btwRow.isConnected) return;
+    const inner=$('msgInner');
+    if(!inner) return;
+    btwRow=document.createElement('div');
+    btwRow.className='msg-row msg-row-btw';
+    btwRow.dataset.role='assistant';
+    btwRow.dataset.btw='1';
+    const labelEl=document.createElement('div');
+    labelEl.className='msg-btw-label';
+    labelEl.textContent=t('btw_label');
+    const qEl=document.createElement('div');
+    qEl.className='msg-body';
+    qEl.textContent=question;
+    const ansEl=document.createElement('div');
+    ansEl.className='msg-body msg-btw-answer';
+    ansEl.textContent='...';
+    btwRow.appendChild(labelEl);
+    btwRow.appendChild(qEl);
+    btwRow.appendChild(ansEl);
+    inner.appendChild(btwRow);
+    btwRow.scrollIntoView({behavior:'smooth',block:'end'});
+  }
+  src.addEventListener('token',e=>{
+    try{answer+=JSON.parse(e.data).text||'';}catch(_){}
+    _ensureBtwRow();
+    const ansEl=btwRow&&btwRow.querySelector('.msg-btw-answer');
+    if(ansEl) ansEl.innerHTML=renderMd(answer);
+  });
+  src.addEventListener('done',e=>{
+    src.close();
+    _streamDone=true;
+    try{
+      const d=JSON.parse(e.data);
+      if(d.answer&&!answer) answer=d.answer;
+    }catch(_){}
+    _ensureBtwRow();
+    if(btwRow&&btwRow.isConnected){
+      const ansEl=btwRow.querySelector('.msg-btw-answer');
+      if(ansEl) ansEl.innerHTML=renderMd(answer||t('btw_no_answer'));
+    }
+    showToast(t('btw_done'));
+  });
+  src.addEventListener('apperror',e=>{
+    src.close();
+    _streamDone=true;
+    try{
+      const d=JSON.parse(e.data);
+      showToast(t('btw_failed')+(d.message||''));
+    }catch(_){showToast(t('btw_failed'));}
+    if(btwRow&&btwRow.isConnected) btwRow.remove();
+  });
+  src.addEventListener('stream_end',()=>{src.close();});
+  src.onerror=()=>{src.close();if(!_streamDone&&btwRow&&btwRow.isConnected) btwRow.remove();};
+}
+
+// ── /background task tracking ────────────────────────────────────────────────
+
+let _bgPollTimers={};
+let _bgActiveTasks=new Set();
+
+function showBackgroundBadge(taskId){
+  _bgActiveTasks.add(taskId);
+  const badge=$('bgBadge');
+  if(badge){
+    badge.textContent=String(_bgActiveTasks.size);
+    badge.style.display=_bgActiveTasks.size?'':'none';
+  }
+}
+function hideBackgroundBadge(taskId){
+  _bgActiveTasks.delete(taskId);
+  const badge=$('bgBadge');
+  if(badge){
+    badge.textContent=String(_bgActiveTasks.size);
+    badge.style.display=_bgActiveTasks.size?'':'none';
+  }
+}
+function startBackgroundPolling(parentSid, taskId, prompt){
+  if(_bgPollTimers[taskId]) return;
+  async function _poll(){
+    try{
+      const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
+      if(r&&r.results){
+        for(const res of r.results){
+          if(res.task_id===taskId){
+            hideBackgroundBadge(taskId);
+            delete _bgPollTimers[taskId];
+            const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
+            S.messages.push(msg);
+            renderMessages();
+            showToast(t('bg_complete'));
+            return;
+          }
+        }
+      }
+    }catch(_){}
+    _bgPollTimers[taskId]=setTimeout(_poll,3000);
+  }
+  _poll();
 }
 
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──
