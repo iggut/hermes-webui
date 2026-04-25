@@ -494,7 +494,27 @@ def _list_pending_approvals() -> list[dict]:
 def _run_sync_turn(session_id: str, message: str, timeout_seconds: float = 3.0):
     if _get_ai_agent() is None:
         raise RuntimeError("agent runtime unavailable")
-    s = get_session(session_id)
+    try:
+        s = get_session(session_id)
+    except KeyError:
+        # If it's a CLI-backed session, import it into the WebUI store first.
+        # This makes it manageable by the agent runtime for sync turns.
+        from api.models import get_cli_sessions, get_cli_session_messages, import_cli_session
+
+        cli_matches = [sx for sx in get_cli_sessions() if sx.get("session_id") == session_id]
+        if not cli_matches:
+            raise
+        cli_s = cli_matches[0]
+        msgs = get_cli_session_messages(session_id)
+        s = import_cli_session(
+            session_id=session_id,
+            title=cli_s.get("title", "Untitled"),
+            messages=msgs,
+            model=cli_s.get("model", "unknown"),
+            profile=cli_s.get("profile"),
+            created_at=cli_s.get("created_at"),
+            updated_at=cli_s.get("updated_at"),
+        )
     stream_id = uuid.uuid4().hex
     q = queue.Queue()
     with STREAMS_LOCK:
@@ -733,6 +753,18 @@ def handle_courier_post(handler, parsed, body) -> bool:
                 "choice": mapped_choice,
             },
         )
+
+    if parsed.path == "/v1/skills/save":
+        from api.routes import _handle_skill_save
+        return _handle_skill_save(handler, body)
+
+    if parsed.path == "/v1/skills/delete":
+        from api.routes import _handle_skill_delete
+        return _handle_skill_delete(handler, body)
+
+    if parsed.path == "/v1/skills/content":
+        from api.routes import _handle_skill_content
+        return _handle_skill_content(handler, body)
 
     if parsed.path == "/v1/conversation":
         body_text = str(body.get("body") or "").strip()

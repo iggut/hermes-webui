@@ -40,3 +40,5 @@ Thumbs.db
 docs/*
 !docs/ui-ux/
 !docs/ui-ux/**
+# CocoIndex Code (ccc)
+/.cocoindex_code/

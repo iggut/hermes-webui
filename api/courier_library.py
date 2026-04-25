@@ -440,6 +440,56 @@ def courier_logs_response(query: str = "") -> list[dict] | dict:
     return collected[:limit]
 
 
+# ── /v1/models ───────────────────────────────────────────────────────────────
+
+
+def courier_models_response() -> list[dict] | dict:
+    """Return Courier-shaped model list sourced from api.config.get_available_models()."""
+    try:
+        from api.config import get_available_models
+    except Exception as exc:
+        logger.debug("models module unavailable: %s", exc)
+        return _unavailable(
+            "models",
+            f"api.config.get_available_models unavailable: {exc}",
+            "/v1/models",
+        )
+
+    try:
+        data = get_available_models()
+        # get_available_models returns a dict like {'groups': [{'provider': str, 'models': [...]}]}
+        groups = data.get("groups") or []
+        raw_items = []
+        for g in groups:
+            raw_items.extend(g.get("models") or [])
+    except Exception as exc:
+        logger.debug("get_available_models() failed: %s", exc)
+        return _unavailable(
+            "models",
+            f"get_available_models() raised: {exc}",
+            "/v1/models",
+        )
+
+    items: list[dict] = []
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            continue
+        mid = entry.get("id") or entry.get("modelId")
+        if not mid:
+            continue
+        # Use existing label or name as the Courier 'name'
+        name = entry.get("label") or entry.get("name") or mid
+        items.append(
+            {
+                "id": str(mid),
+                "name": str(name),
+                "capability": "conversation",
+            }
+        )
+
+    return {"items": items}
+
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 
@@ -462,5 +512,8 @@ def handle_courier_library_get(handler, parsed) -> bool:
         return True
     if path == "/v1/logs":
         j(handler, courier_logs_response(parsed.query or ""))
+        return True
+    if path == "/v1/models":
+        j(handler, courier_models_response())
         return True
     return False
