@@ -153,7 +153,7 @@ async function send(){
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true);
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
     return;
   }
 
@@ -192,6 +192,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // streaming-markdown state: incremental DOM-building parser per segment
   let _smdParser=null;     // current smd parser instance (null until first content)
   let _smdWrittenLen=0;    // how many chars of displayText have been fed to smd parser
+  let _smdWrittenText='';  // exact displayText snapshot used for prefix-alignment checks
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
   let _smdReconnect=reconnecting;
@@ -215,6 +216,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       toolCalls:inflight.toolCalls||[],
     });
   }
+  // Throttled variant for token-by-token updates. persistInflightState()
+  // calls saveInflightState() which does JSON.parse + JSON.stringify + write
+  // on the entire inflight map every call. On a fast model at 60 tok/s with
+  // a 10KB messages array this is ~36MB of JSON churn per second — a major
+  // GC pressure source that causes the renderer to crash under load.
+  // State transitions (tool events, done, error) still call persistInflightState()
+  // directly so no more than 2s of progress is lost on a crash.
+  let _persistTimer=null;
+  function _throttledPersist(){
+    if(_persistTimer) return;
+    _persistTimer=setTimeout(()=>{_persistTimer=null;persistInflightState();},2000);
+  }
   function _closeSource(){
     closeLiveStream(activeSid, streamId);
   }
@@ -232,11 +245,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       inflight.messages[assistantIdx].content=assistantText;
       inflight.messages[assistantIdx].reasoning=reasoningText||undefined;
       inflight.messages[assistantIdx]._ts=inflight.messages[assistantIdx]._ts||ts;
-      persistInflightState();
+      _throttledPersist();
       return;
     }
     inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
-    persistInflightState();
+    _throttledPersist();
   }
   function ensureAssistantRow(force=false){
     if(!_isActiveSession()) return;
@@ -300,9 +313,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Strip <function_calls>...</function_calls> blocks (DeepSeek XML tool syntax).
     // These are processed as tool calls server-side; showing them raw in the bubble
     // looks broken. Also handles orphaned opening tags mid-stream. (#702)
-    if(!s||s.toLowerCase().indexOf('<function_calls>')===-1) return s;
-    s=s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,'');
-    s=s.replace(/<function_calls>[\s\S]*$/i,'');
+    // Also handles DSML-prefixed variants from DeepSeek/Bedrock, including
+    // spacing variants like "<｜DSML |function_calls" and truncated prefixes.
+    if(!s) return s;
+    const lo=String(s).toLowerCase();
+    if(lo.indexOf('function_calls')===-1 && lo.indexOf('dsml')===-1) return s;
+    // Support both plain <function_calls> and DSML-prefixed variants.
+    s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>[\s\S]*?<\/(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>/gi,'');
+    // Also remove truncated opening tags (missing closing ">" at stream tail).
+    s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
+    // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
+    s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
     return s.trim();
   }
   function _streamDisplay(){
@@ -376,6 +397,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Called when assistantBody is first created and after each tool-call segment reset.
   function _smdNewParser(el){
     _smdWrittenLen=0;
+    _smdWrittenText='';
     if(!window.smd){_smdParser=null;return;}
     const renderer=window.smd.default_renderer(el);
     _smdParser=window.smd.parser(renderer);
@@ -390,15 +412,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     _smdParser=null;
     _smdWrittenLen=0;
+    _smdWrittenText='';
   }
   // Helper: feed new displayText delta to the smd parser.
   // Only feeds chars beyond what has already been written (_smdWrittenLen).
   function _smdWrite(displayText){
     if(!_smdParser||!window.smd) return;
-    const delta=displayText.slice(_smdWrittenLen);
+    displayText=String(displayText||'');
+    // Self-heal desyncs: if displayText no longer starts with what we've already
+    // written (e.g. due to stream sanitization/tag stripping), incremental slicing
+    // can skip characters. Rebuild parser from the full current displayText.
+    if(_smdWrittenText && !displayText.startsWith(_smdWrittenText)){
+      _smdParser=null;
+      _smdWrittenLen=0;
+      _smdWrittenText='';
+      if(assistantBody) assistantBody.innerHTML='';
+      _smdNewParser(assistantBody);
+      if(!_smdParser) return;
+    }
+    const delta=displayText.slice(_smdWrittenText.length);
     if(!delta) return;
     try{window.smd.parser_write(_smdParser,delta);}catch(_){}
     _smdWrittenLen=displayText.length;
+    _smdWrittenText=displayText;
     // streaming-markdown does NOT sanitize URL schemes — `[click](javascript:...)`
     // and `![alt](javascript:...)` survive as href/src.  Strip any unsafe schemes
     // from anchors/images that were just added to the live DOM.  The existing
@@ -425,13 +461,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_SMD_SAFE_URL_RE.test(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
     }
   }
+  let _lastRenderMs=0;
   function _scheduleRender(){
     if(_renderPending) return;
     if(_streamFinalized) return; // Bug A: don't schedule new rAF after stream finalized
     _renderPending=true;
-    _pendingRafHandle=requestAnimationFrame(()=>{
+    // Cap render rate to ~15fps. The browser's rAF fires at 60fps, but each DOM
+    // update takes 50-150ms on large sessions. During GC pauses, rAF callbacks
+    // accumulate and then execute all at once, blocking the main thread for
+    // multi-second stretches and crashing the renderer (Chrome error code 4/5).
+    // Throttling to 66ms intervals prevents this pileup without noticeable
+    // visual degradation — streaming text updates still feel immediate.
+    // performance.now() is monotonic so tab suspend/resume and NTP adjustments
+    // can't produce negative or enormous deltas.
+    const sinceLastMs=performance.now()-_lastRenderMs;
+    const _doRender=()=>{
       _pendingRafHandle=null;
       _renderPending=false;
+      // Guard: a pending setTimeout+rAF can outlive stream finalization.
+      if(_streamFinalized) return;
+      _lastRenderMs=performance.now();
       const parsed=_parseStreamState();
       _renderLiveThinking(parsed);
       if(assistantBody){
@@ -454,7 +503,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
       scrollIfPinned();
-    });
+    };
+    if(sinceLastMs>=66){
+      _pendingRafHandle=requestAnimationFrame(_doRender);
+    } else {
+      _pendingRafHandle=setTimeout(()=>requestAnimationFrame(_doRender), 66-sinceLastMs);
+    }
   }
 
   function _wireSSE(source){
@@ -616,11 +670,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       _terminalStateReached=true;
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       // Bug A fix: cancel any pending rAF and mark stream finalized before
       // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
       // can reintroduce a stale thinking card or duplicate content.
       _streamFinalized=true;
-      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       // Finalize smd parser — flushes any remaining buffered markdown state
       // and runs Prism + copy buttons on the live segment before the DOM is replaced
@@ -671,7 +726,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _markSessionViewed(activeSid, d.session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
       }
-      renderSessionList();setBusy(false);setStatus('');
+      _queueDrainSid=activeSid;renderSessionList();setBusy(false);setStatus('');
       setComposerStatus('');
       playNotificationSound();
       sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
@@ -699,8 +754,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('apperror',e=>{
       _terminalStateReached=true;
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
-      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
@@ -777,8 +833,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('cancel',e=>{
       _terminalStateReached=true;
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
-      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
@@ -843,7 +900,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _markSessionViewed(activeSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();
       }
-      renderSessionList();setBusy(false);setComposerStatus('');
+      _queueDrainSid=activeSid;renderSessionList();setBusy(false);setComposerStatus('');
       return true;
     }catch(_){
       return false;
@@ -853,8 +910,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _handleStreamError(){
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
+    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _streamFinalized=true;
-    if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+    if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
     _closeSource();
@@ -893,7 +951,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
             clearLiveToolCards();
             removeThinking();
-            setBusy(false);
+            _queueDrainSid=activeSid;setBusy(false);
             setComposerStatus('');
             renderMessages();
             renderSessionList();
@@ -1329,7 +1387,7 @@ function sendBrowserNotification(title,body){
 
 function attachBtwStream(parentSid, streamId, question){
   if(!parentSid||!streamId) return;
-  const src=new EventSource('/api/stream?stream_id='+encodeURIComponent(streamId));
+  const src=new EventSource('/api/chat/stream?stream_id='+encodeURIComponent(streamId));
   let answer='';
   let btwRow=null;
   let _streamDone=false;

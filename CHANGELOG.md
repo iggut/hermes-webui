@@ -5,6 +5,112 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.205 — 2026-04-24
+
+### Fixed
+- **Workspace add: allow external paths not under home directory** — adding a workspace path such as `/mnt/d/Projects` (WSL) or any directory outside `$HOME` was blocked by a circular dependency: `resolve_trusted_workspace()` required the path to already be in the saved workspace list, but saving it required passing the same check. A new `validate_workspace_to_add()` function is now used by `/api/workspaces/add` — it only rejects non-existent paths, non-directories, and known system roots. The stricter `resolve_trusted_workspace()` continues to gate actual file read/write operations within a workspace. (`api/workspace.py`, `api/routes.py`) Closes #953. [#991]
+
+## v0.50.204 — 2026-04-24
+
+### Fixed
+- **Docker: HERMES_HOME corrected from `/root/.hermes` to `/home/hermes/.hermes`** — `docker-compose.two-container.yml` and `docker-compose.three-container.yml` both set `HERMES_HOME=/root/.hermes` and mounted the shared `hermes-home` volume to `/root/.hermes`. The `nousresearch/hermes-agent` image drops privileges to a `hermes` user (uid=10000) via `gosu`, after which `/root` is mode `700` and inaccessible — causing `mkdir: cannot create directory '/root': Permission denied` on every startup. Fixed to use `/home/hermes/.hermes` throughout. (`docker-compose.two-container.yml`, `docker-compose.three-container.yml`) Closes #967. [#989]
+
+## v0.50.203 — 2026-04-24
+
+### Fixed
+- **Queue drain race condition — drain the correct session after cross-session stream completion** — `setBusy(false)` was draining `S.session.session_id` (the *currently viewed* session) rather than the session that just finished streaming. When the user switched sessions mid-stream, queued follow-up messages for the original session were silently dropped. A new `_queueDrainSid` variable is set to `activeSid` just before calling `setBusy(false)` in all stream terminal handlers; `setBusy()` reads it once and clears it. (`static/messages.js`, `static/ui.js`, `tests/test_regressions.py`) By @24601. [#964]
+
+## v0.50.202 — 2026-04-24
+
+### Fixed
+- **Throttle inflight localStorage persist to prevent GC crash** — `saveInflightState()` was called on every token, doing `JSON.parse` + mutate + `JSON.stringify` + `localStorage.setItem` on the full inflight state map. At 60 tok/s with a 10KB messages array this produced ~36MB of JSON churn per second, the primary GC pressure source causing Chrome renderer crashes (error codes 4/5). A `_throttledPersist()` wrapper now batches writes to at most once per 2 seconds. State transitions (done/apperror/cancel/error) still flush synchronously so no more than 2s of progress is lost on a crash. (`static/messages.js`) By @24601. [#972]
+
+## v0.50.201 — 2026-04-24
+
+### Fixed
+- **Streaming render cleanup: call `clearTimeout` at all `_pendingRafHandle` sites** — PR #966's render-throttling logic uses `setTimeout(→rAF)` when within the 66ms budget window, so `_pendingRafHandle` can hold a `setTimeout` ID rather than a `requestAnimationFrame` ID. All four cleanup sites only called `cancelAnimationFrame()`, which is a no-op for `setTimeout` handles, leaving stale callbacks that could fire after stream finalization. Fixed to call both `clearTimeout()` and `cancelAnimationFrame()` (each is a no-op on the other's handle type). (`static/messages.js`) [#985]
+
+## v0.50.200 — 2026-04-24
+
+### Changed
+- **Session render cache — skip O(n) rebuild on back-navigation** — `renderMessages()` now caches rendered HTML per session (keyed by `session_id` + message count). Switching back to a previously-rendered session serves the cached DOM instantly instead of running a full markdown parse, Prism highlight, and KaTeX pass over every message. Cache is limited to 8 sessions and 300KB of rendered HTML per entry. Active streaming sessions always bypass the cache. (`static/ui.js`) By @24601. [#963]
+
+## v0.50.199 — 2026-04-24
+
+### Fixed
+- **Streaming renderer crash under GC pressure** — `_scheduleRender()` previously used `requestAnimationFrame` (up to 60fps), but each DOM update takes 50–150ms on large sessions. During GC pauses, rAF callbacks accumulated and then fired sequentially, blocking the main thread for seconds and crashing the renderer (Chrome error codes 4/5, ERR_CONNECTION_RESET). The render rate is now capped at ~15fps (66ms min interval) via a `setTimeout` → `requestAnimationFrame` chain. Stream cleanup now calls both `clearTimeout()` and `cancelAnimationFrame()` so the handle is correctly cancelled regardless of which path scheduled it. (`static/messages.js`) By @24601. [#966]
+
+## v0.50.198 — 2026-04-24
+
+### Fixed
+- **`_accepts_gzip()` hardened for test harness** — `handler.headers.get()` now uses `getattr(handler, 'headers', None)` so any synthetic handler without a `headers` attribute (including the `_FakeHandler` used in session-compress tests) no longer throws `AttributeError`. (`api/helpers.py`)
+- **Stale test assertions updated post-#959** — two static-analysis assertions in `test_issue401.py` and `test_regressions.py` referenced minified JS string patterns that PR #959 reformatted; updated to accept either form. (`tests/test_issue401.py`, `tests/test_regressions.py`) [#981]
+
+## v0.50.197 — 2026-04-24
+
+### Changed
+- **Complete Traditional Chinese (zh-Hant) translations** — adds full zh-Hant locale coverage (300+ translation entries) across all UI sections. Fixes mixed Simplified/Traditional character inconsistency in the existing zh translations. Also adds English-fallback entries to zh/ru/es/de for newly-added session management and settings keys (session_archive, session_pin, session_duplicate, settings_dropdown_*, etc.). (`static/i18n.js`) By @ruxme. [#954]
+
+## v0.50.196 — 2026-04-24
+
+### Fixed
+- **Fast conversation switching with metadata-first session load** — switching between conversations in the sidebar now does a two-phase load: phase 1 fetches only metadata (title, model, timestamps) instantly, then phase 2 lazily loads the full message history. Backend `Session.save()` reorders JSON fields so metadata appears before the messages array, enabling a 1KB prefix-read path for small sessions. JSON responses over 1KB are gzip-compressed (4x smaller for large histories). Includes `try/catch` in `_ensureMessagesLoaded` so network errors show "Failed to load" rather than a stuck "Loading conversation…" state. (`api/models.py`, `api/helpers.py`, `api/routes.py`, `static/sessions.js`) By @JKJameson. [#959]
+
+## v0.50.195 — 2026-04-24
+
+### Fixed
+- **Auth sessions now persist across server restarts** — previously `_sessions` was an in-memory dict, so every process restart (launchd, systemd, container recycle) invalidated all browser sessions and forced users to log in again. Sessions are now atomically persisted to `STATE_DIR/.sessions.json` (0600 permissions) via a temp-file + `os.replace()` write pattern. Expired sessions are pruned on load. Corrupt or missing session files start fresh without crashing. (`api/auth.py`, `tests/test_auth_session_persistence.py`) By @24601. [#962]
+
+## v0.50.194 — 2026-04-24
+
+### Fixed
+- **Prevent dropped characters in incremental streaming-markdown path** — detects parser/text prefix desync in `_smdWrite()` (which can occur after stream sanitization strips content mid-stream) and rebuilds the parser from the full current display text rather than continuing to slice from a stale offset. Adds `_smdWrittenText` tracking variable for accurate prefix-alignment checks. (`static/messages.js`) By @bsgdigital. [#960]
+
+## v0.50.193 — 2026-04-24
+
+### Fixed
+- **Strip malformed DSML `function_calls` tags from DeepSeek/Bedrock responses** — extends the existing XML tool-call stripping logic to handle DeepSeek's DSML-prefixed variants (`<｜DSML｜function_calls>`, `<｜DSML |function_calls`, and fragmented `<｜DSML |` tokens) in backend (`api/streaming.py`), live streaming (`static/messages.js`), and settled render (`static/ui.js`). Prevents raw function-call XML from leaking into message content. (`api/streaming.py`, `static/messages.js`, `static/ui.js`) By @bsgdigital. [#958]
+
+## v0.50.192 — 2026-04-24
+
+### Changed
+- **`defer` attribute added to all local script tags** — scripts already sit at the end of `<body>` so this is largely a belt-and-suspenders improvement, but `defer` makes the intent explicit and allows browsers to start parsing before the DOM is fully ready without blocking. Execution order preserved (defer is order-preserving per spec). (`static/index.html`) By @ruxme. [#951]
+
+## v0.50.191 — 2026-04-24
+
+### Fixed
+- **WebUI sessions now pass `platform='webui'` to Hermes Agent** — previously all browser-originated sessions passed `platform='cli'`, causing the agent to inject CLI-specific guidance ("avoid markdown, use plain text") that degraded WebUI output quality. Changed to `platform='webui'` in all three AIAgent call sites (`api/streaming.py`, `api/routes.py`). `'webui'` has no entry in `PLATFORM_HINTS` so no conflicting platform guidance is injected. Includes regression tests. (`api/streaming.py`, `api/routes.py`, `tests/test_webui_platform_hint.py`) By @starship-s. [#948]
+
+## v0.50.190 — 2026-04-24
+
+### Fixed
+- **`.venv` discovery in `_discover_python()`** — adds `.venv/bin/python` (Linux/macOS) and `.venv/Scripts/python.exe` (Windows) alongside the existing `venv/` paths, fixing issue #938 where setups using a `.venv` directory failed silently to locate the Hermes agent interpreter. (`api/config.py`) By @xingyue52077. Closes #938. [#949]
+
+## v0.50.189 — 2026-04-24
+
+### Fixed
+- **CSP: explicit `manifest-src 'self'` directive** — adds `manifest-src 'self'` to the `Content-Security-Policy` header. Browsers fall back to `default-src` when `manifest-src` is absent (functionally correct), but being explicit satisfies strict CSP audits and avoids browser-specific deviations. Includes regression test. (`api/helpers.py`, `tests/test_pwa_manifest_csp.py`) By @24601. [#961]
+
+## v0.50.189 — 2026-04-24
+
+### Fixed
+- **CSP: explicit `manifest-src 'self'` directive** — adds `manifest-src 'self'` to the `Content-Security-Policy` header. Browsers fall back to `default-src` when `manifest-src` is absent (functionally correct), but the explicit directive satisfies strict CSP audits and avoids any browser-specific deviation. Includes regression test. (`api/helpers.py`, `tests/test_pwa_manifest_csp.py`) By @24601. [#961]
+
+## v0.50.188 — 2026-04-24
+
+### Fixed
+- **`/btw` command: corrected SSE endpoint** — `attachBtwStream()` was connecting to `/api/stream` (which has never existed), causing every `/btw` invocation to get a 404 and produce no answer. Fixed to `/api/chat/stream`. Also aligned the `EventSource` constructor to use `URL()` + `withCredentials:true` for consistency with the rest of `static/messages.js`. (`static/messages.js`) By @bergeouss. Closes #945. [#950]
+
+## v0.50.187 — 2026-04-24
+
+### Fixed
+- **Rail/hamburger breakpoint gap closed** — at 641–767px the rail was hidden (required ≥768px) and the hamburger was also hidden (only ≤640px), leaving an awkward in-between zone. Rail breakpoint moved to ≥641px so the rail appears alongside the persistent sidebar at medium widths. Mobile slide-in behavior (hamburger toggle, overlay scrim) is unchanged at ≤640px. (`static/style.css`) [#956]
+
+## v0.50.186 — 2026-04-24
+
+### Changed
+- **Three-column layout with left rail + main-view migration** — unifies the shell into a rail (48px, desktop-only) + sidebar + main-view canvas matching the hermes-desktop reference. Every per-item detail/edit surface (skills, tasks, workspaces, profiles, memory) now lives in a dedicated `#mainX` container with consistent headers, empty states, and action buttons. Settings moves out of a modal overlay into a full main-view page (ESC closes it). YAML frontmatter renders in a collapsible `<details>` block in skill detail. Toasts repositioned to top-right with theme-aware success/error/warning/info variants. Composer workspace chip split into files-icon + label buttons. `.settings-menu` → `.side-menu` / `.side-menu-item` (shared by memory and settings panels). Mobile: hamburger in titlebar, slide-in sidebar. New i18n keys across en/ru/es/de/zh/zh-Hant for all new form labels. 9 new regression tests. (`static/index.html`, `static/style.css`, `static/panels.js`, `static/boot.js`, `static/sessions.js`, `static/ui.js`, `static/i18n.js`, `tests/test_settings_navigation_and_detail_refresh.py`) By @aronprins. [#899]
+
 ## v0.50.185 — 2026-04-24
 
 ### Fixed

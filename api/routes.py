@@ -335,6 +335,7 @@ from api.workspace import (
     read_file_content,
     safe_resolve_ws,
     resolve_trusted_workspace,
+    validate_workspace_to_add,
 )
 from api.upload import handle_upload, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
@@ -715,23 +716,47 @@ def handle_get(handler, parsed) -> bool:
         return _serve_static(handler, parsed)
 
     if parsed.path == "/api/session":
+        import time as _time
+        _t0 = _time.monotonic()
+        _debug_slow = os.environ.get("HERMES_DEBUG_SLOW", "")
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return j(handler, {"error": "session_id is required"}, status=400)
+        # ?messages=0 skips the message payload for fast session switching.
+        # The frontend uses this when switching conversations in the sidebar
+        # (only needs metadata). The full message array is loaded lazily
+        # via ?messages=1 when the message panel opens.
+        load_messages = parse_qs(parsed.query).get("messages", ["1"])[0] != "0"
         try:
-            s = get_session(sid)
+            _t1 = _time.monotonic()
+            s = get_session(sid, metadata_only=(not load_messages))
+            _t2 = _time.monotonic()
             effective_model = _resolve_effective_session_model_for_display(s)
+            _t3 = _time.monotonic()
             raw = s.compact() | {
-                "messages": s.messages,
-                "tool_calls": getattr(s, "tool_calls", []),
+                "messages": s.messages if load_messages else [],
+                "tool_calls": getattr(s, "tool_calls", []) if load_messages else [],
                 "active_stream_id": getattr(s, "active_stream_id", None),
                 "pending_user_message": getattr(s, "pending_user_message", None),
-                "pending_attachments": getattr(s, "pending_attachments", []),
+                "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
             }
+            _t4 = _time.monotonic()
             if effective_model:
                 raw["model"] = effective_model
-            return j(handler, {"session": redact_session_data(raw)})
+            redact = redact_session_data(raw)
+            _t5 = _time.monotonic()
+            resp = j(handler, {"session": redact})
+            _t6 = _time.monotonic()
+            if _debug_slow:
+                logger.warning(
+                    "[SLOW] session_id=%s get_session=%.1fms model_resolve=%.1fms "
+                    "compact=%.1fms redact=%.1fms json_write=%.1fms total=%.1fms",
+                    sid,
+                    (_t2-_t1)*1000, (_t3-_t2)*1000, (_t4-_t3)*1000,
+                    (_t5-_t4)*1000, (_t6-_t5)*1000, (_t6-_t0)*1000,
+                )
+            return resp
         except KeyError:
             # Not a WebUI session -- try CLI store
             msgs = get_cli_session_messages(sid)
@@ -1124,6 +1149,19 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    if parsed.path == "/api/admin/reload":
+        # Hot-reload api.models module to pick up code changes without restart.
+        import importlib
+        from api import models as _models
+        importlib.reload(_models)
+        # Also re-expose get_session from the reloaded module so routes.py
+        # continues to work (routes.py imported it at module level).
+        import api.routes as _routes
+        _routes.get_session = _models.get_session
+        _routes.Session = _models.Session
+        _routes.compact = _models.compact
+        return j(handler, {"status": "ok", "reloaded": "api.models"})
 
     if parsed.path == "/api/sessions/cleanup":
         return _handle_sessions_cleanup(handler, body, zero_only=False)
@@ -2799,7 +2837,9 @@ def _handle_chat_sync(handler, body):
                 provider=_provider,
                 base_url=_base_url,
                 api_key=_api_key,
-                platform="cli",
+                # Identify browser-originated sessions as WebUI so Hermes Agent
+                # does not inject CLI-specific terminal/output guidance.
+                platform="webui",
                 quiet_mode=True,
                 enabled_toolsets=_resolve_cli_toolsets(),
                 session_id=s.session_id,
@@ -3082,7 +3122,7 @@ def _handle_workspace_add(handler, body):
     if not path_str:
         return bad(handler, "path is required")
     try:
-        p = resolve_trusted_workspace(path_str)
+        p = validate_workspace_to_add(path_str)
     except ValueError as e:
         return bad(handler, str(e))
     wss = load_workspaces()
@@ -3402,7 +3442,9 @@ def _handle_session_compress(handler, body):
             provider=resolved_provider,
             base_url=resolved_base_url,
             api_key=resolved_api_key,
-            platform="cli",
+            # Identify browser-originated sessions as WebUI so Hermes Agent
+            # does not inject CLI-specific terminal/output guidance.
+            platform="webui",
             quiet_mode=True,
             enabled_toolsets=_resolve_cli_toolsets(),
             session_id=sid,

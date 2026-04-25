@@ -1,6 +1,13 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default'};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
+// Tracks which session's queue to drain in setBusy(false).
+// Set to activeSid just before setBusy(false) in done/error handlers so the
+// queue drains the session that *finished*, not the one currently viewed.
+// Single-shot: setBusy() reads and clears this on every call. Concurrent
+// back-to-back stream completions would overwrite it, but HTTPServer is
+// single-threaded so only one done event fires at a time in practice.
+let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
@@ -629,10 +636,23 @@ function _stripXmlToolCallsDisplay(s){
   // similar models in their raw response text.  These are processed separately
   // as tool calls; leaving them in the content causes them to render visibly
   // in the settled chat bubble.  (#702)
-  if(!s||s.toLowerCase().indexOf('<function_calls>')===-1) return s;
-  s=s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,'');
-  s=s.replace(/<function_calls>[\s\S]*$/i,'');
+  // Also handles DSML-prefixed variants from DeepSeek/Bedrock, including
+  // spacing variants like "<｜DSML |function_calls" and truncated prefixes.
+  if(!s) return s;
+  const lo=String(s).toLowerCase();
+  if(lo.indexOf('function_calls')===-1 && lo.indexOf('dsml')===-1) return s;
+  // Support both plain <function_calls> and DSML-prefixed variants.
+  s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>[\s\S]*?<\/(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>/gi,'');
+  // Also remove truncated opening tags (missing closing ">" at stream tail).
+  s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
+  // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
+  s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
   return s.trim();
+}
+
+function _sanitizeThinkingDisplayText(text){
+  const stripped=_stripXmlToolCallsDisplay(String(text||''));
+  return stripped.trim();
 }
 
 function renderMd(raw){
@@ -933,10 +953,12 @@ function setBusy(v){
     setComposerStatus('');
     // Always hide Cancel button when not busy
     const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
-    const sid=S.session&&S.session.session_id;
+    const sid=_queueDrainSid||(S.session&&S.session.session_id);
+    _queueDrainSid=null;
     updateQueueBadge(sid);
-    // Drain one queued message for the currently viewed session after UI settles
-    const next=sid?shiftQueuedSessionMessage(sid):null;
+    // Drain one queued message for the finished session after UI settles
+    const _isViewedSid=!S.session||sid===S.session.session_id;
+    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
     if(next){
       updateQueueBadge(sid);
       setTimeout(()=>{
@@ -966,7 +988,7 @@ function updateQueueBadge(sessionId){
     badge.remove();
   }
 }
-function showToast(msg,ms){const el=$('toast');el.textContent=msg;el.classList.add('show');clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove('show'),ms||2800);}
+function showToast(msg,ms,type){const el=$('toast');if(!el)return;const s=String(msg==null?'':msg);let t=type;if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}el.textContent=s;el.className='toast show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.classList.remove('show');},ms||2800);}
 
 // ── Shared app dialogs ───────────────────────────────────────────────────────
 // showConfirmDialog(opts) and showPromptDialog(opts) replace browser-native dialog calls
@@ -1384,13 +1406,15 @@ function syncTopbar(){
         sidebarName.textContent=t('no_workspace');
       }
     }
+    if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
-  $('topbarTitle').textContent=sessionTitle;
+  const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
   document.title=sessionTitle+' \u2014 '+(window._botName||'Hermes');
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
-  $('topbarMeta').textContent=t('n_messages',vis.length);
+  const _topbarMeta=$('topbarMeta');if(_topbarMeta)_topbarMeta.textContent=t('n_messages',vis.length);
+  if(typeof syncAppTitlebar==='function') syncAppTitlebar();
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;
@@ -1474,7 +1498,8 @@ function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
 function _thinkingCardHtml(text){
-  return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(text)}</pre></div></div>`;
+  const clean=_sanitizeThinkingDisplayText(text);
+  return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
@@ -1679,8 +1704,40 @@ function renderCompressionUi(){
   el.innerHTML='';
   el.style.display='none';
 }
+// Session render cache: avoids full markdown+DOM rebuild when switching back
+// to a session that was already rendered with the same message count.
+// Keyed by session_id. Only used on cross-session navigation, never for
+// in-session updates (new messages, edits, stream events).
+//
+// Known limitation: cache key is session_id + message count. Edits and retries
+// that mutate message content without changing the count will serve stale HTML
+// on back-navigation until the user triggers an in-session update. Acceptable
+// for the common read-only back-navigation case; not suitable as a general cache.
+const _sessionHtmlCache=new Map();
+let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
+
 function renderMessages(){
   const inner=$('msgInner');
+  const sid=S.session?S.session.session_id:null;
+  const msgCount=S.messages.length;
+
+  // Fast path: switching back to a previously rendered session with same count.
+  // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
+  // new messages, tool_complete) always get a fresh rebuild.
+  // Skip cache if this session is still streaming — the live smd parser writes
+  // into a DOM node inside the cached subtree; serving cached HTML detaches it.
+  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]){
+    const cached=_sessionHtmlCache.get(sid);
+    if(cached&&cached.msgCount===msgCount){
+      inner.innerHTML=cached.html;
+      _sessionHtmlCacheSid=sid;
+      if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
+      if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
+      return;
+    }
+  }
+
   const compressionState=_compressionStateForCurrentSession();
   if(window._compressionUi && !compressionState) clearCompressionUi();
   const sessionCompressionAnchor=(
@@ -1786,7 +1843,7 @@ function renderMessages(){
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
-    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo-2',13)}</button>` : '';
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
@@ -2027,6 +2084,16 @@ function renderMessages(){
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
+  }
+  // Populate session cache so switching back here skips a full rebuild.
+  _sessionHtmlCacheSid=sid;
+  if(sid){
+    const _html=inner.innerHTML;
+    // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
+    if(_html.length<300_000){
+      _sessionHtmlCache.set(sid,{html:_html,msgCount});
+      if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
+    }
   }
 }
 
@@ -2381,8 +2448,9 @@ function renderKatexBlocks(){
 }
 
 function _thinkingMarkup(text=''){
-  return (text&&String(text).trim())
-    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
+  const clean=_sanitizeThinkingDisplayText(text);
+  return (clean&&String(clean).trim())
+    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function finalizeThinkingCard(){

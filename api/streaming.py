@@ -93,14 +93,35 @@ def _strip_xml_tool_calls(text: str) -> str:
 
     Handles both complete blocks (<function_calls>…</function_calls>) and
     partial/orphaned opening tags that may appear at the tail of a stream.
+    Also handles variants like <｜DSML｜function_calls> from DeepSeek on Bedrock.
     """
-    if not text or '<function_calls>' not in text.lower():
+    if not text:
         return text
     s = str(text)
-    # Strip complete blocks (possibly multiple)
-    s = re.sub(r'<function_calls>.*?</function_calls>', '', s, flags=re.IGNORECASE | re.DOTALL)
-    # Strip orphaned opening tags (stream cut off before closing tag)
-    s = re.sub(r'<function_calls>.*$', '', s, flags=re.IGNORECASE | re.DOTALL)
+    # Check if contains any function_calls/DSML marker (case-insensitive)
+    _lo = s.lower()
+    if 'function_calls' not in _lo and 'dsml' not in _lo:
+        return text
+    
+    _dsml_prefix = r'(?:\s*｜\s*DSML\s*[｜|]\s*)?'
+    open_tag = rf'<{_dsml_prefix}function_calls'
+    close_tag = rf'</{_dsml_prefix}function_calls>'
+    # Strip complete blocks for both <function_calls> and <｜DSML｜function_calls>.
+    s = re.sub(
+        rf'{open_tag}>.*?{close_tag}',
+        '',
+        s,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    # Strip orphaned/truncated opening tags, including missing ">" at stream tail.
+    s = re.sub(
+        rf'{open_tag}(?:>|$).*$',
+        '',
+        s,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    # Remove malformed DSML fragments like "<｜DSML |" that can leak in tokens.
+    s = re.sub(r'<\s*｜\s*DSML\s*[｜|]\s*', '', s, flags=re.IGNORECASE)
     return s.strip()
 
 
@@ -1212,7 +1233,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 provider=resolved_provider,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
-                platform='cli',
+                # Identify browser-originated sessions as WebUI so Hermes Agent
+                # does not inject CLI-specific terminal/output guidance.
+                platform='webui',
                 quiet_mode=True,
                 enabled_toolsets=_toolsets,
                 fallback_model=_fallback_resolved,
@@ -1327,6 +1350,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         logger.debug("Periodic checkpoint save failed: %s", e)
 
             _checkpoint_stop = threading.Event()
+            # Persist the user message BEFORE streaming starts so it's durable even if
+            # the server crashes before the first checkpoint fires (every 15s).
+            with _agent_lock:
+                s.save(touch_updated_at=True, skip_index=False)
+
             _ckpt_thread = threading.Thread(
                 target=_periodic_checkpoint, daemon=True,
                 name=f"ckpt-{session_id[:8]}",

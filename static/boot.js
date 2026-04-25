@@ -405,8 +405,7 @@ $('importFileInput').onchange=async(e)=>{
     if(res.ok&&res.session){
       await loadSession(res.session.session_id);
       await renderSessionList();
-      const overlay=$('settingsOverlay');
-      if(overlay) overlay.style.display='none';
+      if(_currentPanel==='settings') switchPanel('chat');
       showToast(t('session_imported'));
     }
   }catch(err){
@@ -524,9 +523,8 @@ document.addEventListener('keydown',async e=>{
       if(typeof skipOnboarding==='function') skipOnboarding();
       return;
     }
-    // Close settings overlay if open
-    const settingsOverlay=$('settingsOverlay');
-    if(settingsOverlay&&settingsOverlay.style.display!=='none'){_closeSettingsPanel();return;}
+    // Close settings panel if active
+    if(_currentPanel==='settings'){_closeSettingsPanel();return;}
     // Close workspace dropdown
     closeWsDropdown();
     // Clear session search
@@ -648,7 +646,10 @@ function _setResolvedTheme(isDark){
   const want=isDark
     ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
     :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
-  if(link.href!==want){ link.href=want; }
+  const wantIntegrity=isDark
+    ?'sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A'
+    :'sha384-rCCjoCPCsizaAAYVoz1Q0CmCTvnctK0JkfCSjx7IIxexTBg+uCKtFYycedUjMyA2';
+  if(link.href!==want){ link.integrity=wantIntegrity; link.href=want; }
 }
 
 function _applyTheme(name){
